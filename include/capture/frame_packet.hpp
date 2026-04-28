@@ -1,8 +1,8 @@
-#pragma once
 #include <cstdint>
 
 struct FramePacket {
+    uint8_t cam_id;
     uint64_t timestamp;
-    uint8_t* data;
+    std::vector<uint8_t> data;
 };
 
