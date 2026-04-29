@@ -69,9 +69,6 @@ public:
 
         // Release exclusive access to the camera
         camera_->release();
-
-        // Stop the camera manager
-        cm_->stop();
     }
 
 private:
