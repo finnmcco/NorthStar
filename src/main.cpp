@@ -10,16 +10,22 @@ int main() {
 
     std::cout << "Starting capture..." << std::endl;
     controller.start_capture();
+    
+    // Start saving frames concurrently on a separate thread
+    std::thread saver_thread([&]() {
+        FrameSaver saver(controller.get_queue(), "./capture_output");
+        saver.save_all();
+    });
 
     // Block main thread for slightly longer than capture duration
     std::this_thread::sleep_for(std::chrono::seconds(6));
+    
+    // Join the saver thread
+    if (saver_thread.joinable()) {
+        saver_thread.join();
+    }
 
     std::cout << "Capture complete." << std::endl;
-    std::cout << "Frames in queue: " << controller.queue_size() << std::endl;
-
-    // Save all frames to disk
-    FrameSaver saver(controller.get_queue(), "./capture_output");
-    saver.save_all();
 
     return 0;
 }

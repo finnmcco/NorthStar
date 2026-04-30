@@ -1,3 +1,4 @@
+#pragma once
 #include <cstdint>
 #include <camera_queue.hpp>
 #include <libcamera/libcamera.h>
@@ -17,9 +18,9 @@ public:
         //first, create a default configuration based on its role as a video capture camera
         auto config = camera_->generateConfiguration({ libcamera::StreamRole::VideoRecording });
         //now format to RGB888
-        config->at(0).pixelFormat = libcamera::formats::RGB888;
+        config->at(0).pixelFormat = libcamera::formats::BGR888;
         //now set the resolution here so we don't need to downscale later
-        config->at(0).size = { 640, 640 };
+        //config->at(0).size = { 640, 640 };
         //now apply the configuration to the camera hardware
         camera_->configure(config.get());
         stream_ = config->at(0).stream(); //save stream pointer as member variable to stop it going out of scope
@@ -51,6 +52,7 @@ public:
         for (auto& request : requests_) {
             camera_->queueRequest(request.get());
         }
+        
     }
 
     void stop()
