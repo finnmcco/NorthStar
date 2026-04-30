@@ -1,3 +1,4 @@
+#pragma once
 #include <queue>
 #include "frame_packet.hpp"
 #include <mutex>
@@ -69,9 +70,6 @@ public:
         return queue_.size();
     }
 
-    CameraQueue& get_queue() {
-        return queue_;
-    }
 private:
     std::size_t max_capacity_;
     std::mutex mutex_;

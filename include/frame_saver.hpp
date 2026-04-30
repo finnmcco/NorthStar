@@ -78,8 +78,8 @@ private:
         // 8 bit depth = 1 byte per channel
         png_set_IHDR(
             png, info,
-            frame.width,           // image width
-            frame.height,          // image height
+            1920,           // image width
+            1080,          // image height
             8,                     // bit depth
             PNG_COLOR_TYPE_RGB,    // colour type
             PNG_INTERLACE_NONE,
@@ -91,8 +91,8 @@ private:
         // Write each row of pixel data
         // libpng expects an array of row pointers
         // each row is width * 3 bytes (R, G, B per pixel)
-        const int row_stride = frame.width * 3;
-        for (uint32_t y = 0; y < frame.height; y++) {
+        const int row_stride = 1920 * 3;
+        for (uint32_t y = 0; y < 1080; y++) {
             // pointer to the start of this row in the frame buffer
             png_bytep row = const_cast<png_bytep>(frame.data.data() + y * row_stride);
             png_write_row(png, row);
