@@ -101,8 +101,7 @@ bool Hailo8Inference::initialize()
         std::cerr << "[Hailo] Failed to activate network group\n";
         return false;
     }
-    activated_network_group_ =
-        std::make_unique<hailort::ActivatedNetworkGroup>(std::move(activated_exp.value()));
+    auto activated_network_group = std::move(activated_exp.value());
 
     std::cout << "[Hailo] Initialized\n"
               << "        input  frame size : " << input_frame_size_  << " bytes\n"
