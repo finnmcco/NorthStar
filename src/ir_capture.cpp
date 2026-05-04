@@ -1,23 +1,23 @@
 #include "ir_capture.hpp"
-
+#include <time.h>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
 
-ThermalCapture::ThermalCapture(IRQueue& outQueue,
+IRCapture::IRCapture(IRQueue& outQueue,
                                const std::string& device)
     : outQueue_(outQueue), device_(device)
 {}
 
-bool ThermalCapture::start()
+bool IRCapture::start()
 {
     if (running_.load()) return true;
     running_ = true;
-    worker_  = std::thread(&ThermalCapture::run, this);
+    worker_  = std::thread(&IRCapture::run, this);
     return true;
 }
 
-void ThermalCapture::stop()
+void IRCapture::stop()
 {
     running_ = false;
     outQueue_.stop();          // unblocks any waiting consumer
@@ -25,7 +25,7 @@ void ThermalCapture::stop()
         worker_.join();
 }
 
-void ThermalCapture::run()
+void IRCapture::run()
 {
     try {
         MLX90640::Driver sensor(device_,
@@ -43,7 +43,7 @@ void ThermalCapture::run()
             if (!got[0] || !got[1]) continue;
 
             IRPacket pkt;
-            pkt.timestamp   = now_ns();
+            pkt.timestamp_us   = now_us();
             pkt.ambientTemp = sensor.ambientTemperature();
 
             // Chess interpolation into packet's own array
@@ -51,20 +51,22 @@ void ThermalCapture::run()
                 raw, pkt.temps.data(), 0.4f);
 
             outQueue_.push(std::move(pkt));
+
+            got[0] = false;
+            got[1] = false;
         }
     }
     catch (const std::exception& ex) {
-        std::cerr << "[ThermalCapture] " << ex.what() << '\n';
+        std::cerr << "[IRCapture] " << ex.what() << '\n';
     }
 
     running_ = false;
 }
 
-uint64_t ThermalCapture::now_ns()
+uint64_t IRCapture::now_us()
 {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()
-        ).count()
-    );
+    struct timespec ts;
+    clock_gettime(CLOCK_BOOTTIME, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1'000'000ULL
+         + static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
 }

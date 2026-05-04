@@ -3,7 +3,9 @@
 #include "camera.hpp"
 #include "camera_queue.hpp"
 #include "ir_queue.hpp"
+#include "ir_capture.hpp"
 #include <thread>
+#include <atomic>
 #include <chrono>
 
 class CaptureController {
@@ -13,8 +15,8 @@ public:
             cam_queue_(300),
             ir_queue_(50),
             ir_capture_(ir_queue_, "/dev/i2c-1"),
-            cam0_(camera_manager_.get(), 0, queue_),
-            cam1_(camera_manager_.get(), 1, queue_)
+            cam0_(camera_manager_.get(), 0, cam_queue_),
+            cam1_(camera_manager_.get(), 1, cam_queue_)
     {
         camera_manager_->start();
     }
@@ -34,6 +36,8 @@ public:
     }
 
     void stop_capture() {
+        bool expected = false;
+        if (!stopped_.compare_exchange_strong(expected, true)) return;
         cam0_.stop();
         cam1_.stop();
         ir_capture_.stop();
@@ -65,6 +69,7 @@ public:
     }
 
 private:
+    std::atomic<bool> stopped_{false};
     std::thread timer_thread_;
     std::unique_ptr<libcamera::CameraManager> camera_manager_;
     CameraQueue cam_queue_;

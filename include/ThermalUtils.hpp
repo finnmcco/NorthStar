@@ -1,7 +1,6 @@
 #pragma once
 
 #include "MLX90640.hpp"
-#include "ThermalAnalyser.hpp"
 #include <array>
 #include <cstddef>
 #include <optional>
@@ -21,6 +20,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace MLX90640 {
+
+constexpr int SENSOR_W = 32;
+constexpr int SENSOR_H = 24;
+
+
+// ── Bounding box (raw sensor pixels, inclusive) ───────────────────────────────
+
+struct BBox {
+    int x0, y0;   // top-left  (clamped to [0, SENSOR_W/H - 1])
+    int x1, y1;   // bottom-right (inclusive)
+};
 
 // ── 0. ChessInterpolator ─────────────────────────────────────────────────────
 //
