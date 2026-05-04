@@ -42,6 +42,7 @@ find_path(HAILO_INCLUDE hailo/hailort.hpp HINTS "${HAILO_ROOT}/include" REQUIRED
 # ─────────────────────────────────────────────────────────────────────────────
 set(COMMON_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${HAILO_INCLUDE}
     ${OpenCV_INCLUDE_DIRS}
 )
@@ -53,18 +54,17 @@ set(COMMON_INCLUDES
 # Inference — always needed
 set(INFERENCE_SOURCES
     src/inference/hailo8_inference.cpp
-    src/util/detection_utils.cpp
+    src/detection_utils.cpp
 )
 
 # Capture — real libcamera pipeline
 set(CAMERA_SOURCES
-    src/capture/camera_capture.cpp
-    src/preprocess/downsampler.cpp
+    src/cam_downsampler.cpp
 )
 
 # Image folder capture — no libcamera, used by image_bench
 set(IMAGE_CAPTURE_SOURCES
-    src/capture/image_capture.cpp
+    src/image_capture.cpp
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,12 +126,6 @@ configure_camera_target(benchmark_detection)
 #      cam0/   <- 640x640 PNG/JPEG images for camera 0
 #      cam1/   <- 640x640 PNG/JPEG images for camera 1 (optional)
 # ─────────────────────────────────────────────────────────────────────────────
-add_executable(image_bench
-    src/image_bench.cpp
-    ${INFERENCE_SOURCES}
-    ${IMAGE_CAPTURE_SOURCES}
-)
-configure_target(image_bench)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Tests  (no libcamera dependency — run on the Pi without cameras attached)
@@ -156,6 +150,15 @@ add_executable(test_queue_ingest
     ${INFERENCE_SOURCES}
 )
 configure_target(test_queue_ingest)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  camera_throughput  —  raw camera frame rate test (no Hailo)
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(camera_throughput
+    src/camera_throughput.cpp
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(camera_throughput)
 
 # test_detection_output
 # Runs one real image through inference and prints a detection table + saves

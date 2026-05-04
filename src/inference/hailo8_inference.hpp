@@ -109,7 +109,6 @@ private:
 
     std::unique_ptr<hailort::VDevice>                vdevice_;
     std::shared_ptr<hailort::ConfiguredNetworkGroup> network_group_;
-    std::unique_ptr<hailort::ActivatedNetworkGroup>  activated_network_group_;
     std::vector<hailort::InputVStream>               input_streams_;
     std::vector<hailort::OutputVStream>              output_streams_;
 

@@ -96,12 +96,6 @@ bool Hailo8Inference::initialize()
     // in scope for the entire inference session — stored as a member for that
     // reason.  Without activation, writes are accepted but inference never runs
     // and both streams time out.
-    auto activated_exp = network_group_->activate();
-    if (!activated_exp) {
-        std::cerr << "[Hailo] Failed to activate network group\n";
-        return false;
-    }
-    auto activated_network_group = std::move(activated_exp.value());
 
     std::cout << "[Hailo] Initialized\n"
               << "        input  frame size : " << input_frame_size_  << " bytes\n"

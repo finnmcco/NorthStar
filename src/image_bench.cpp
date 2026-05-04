@@ -48,12 +48,11 @@
 #include <string>
 #include <vector>
 
-#include "capture/frame_packet.hpp"
-#include "capture/image_capture.hpp"
+#include "frame_packet.hpp"
+#include "image_capture.hpp"
 #include "inference/hailo8_inference.hpp"
-#include "util/buffer_pool.hpp"
-#include "util/detection_utils.hpp"
-#include "util/queue.hpp"
+#include "detection_utils.hpp"
+#include "camera_queue.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Constants

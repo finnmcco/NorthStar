@@ -35,12 +35,11 @@
 #include <string>
 #include <vector>
 
-#include "capture/camera_capture.hpp"
-#include "capture/frame_packet.hpp"
+#include "capture_controller.hpp"
+#include "frame_packet.hpp"
 #include "inference/hailo8_inference.hpp"
-#include "util/buffer_pool.hpp"
-#include "util/detection_utils.hpp"
-#include "util/queue.hpp"
+#include "detection_utils.hpp"
+#include "camera_queue.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Constants
@@ -193,13 +192,10 @@ int main()
     }
 
     // ── Camera pipeline ───────────────────────────────────────────────────────
-    constexpr std::size_t kBuffers       = 8;
-    constexpr std::size_t kBytesPerFrame = 640 * 640 * 3;
 
     queue<FramePacket> frameQueue(4);
-    BufferPool         pool(kBuffers, kBytesPerFrame);
 
-    CameraCapture capture(frameQueue, pool, /*fps=*/30);
+    CameraCapture capture(frameQueue, /*fps=*/30);
     if (!capture.start()) {
         std::cerr << "Failed to start camera\n";
         return 1;
@@ -219,8 +215,7 @@ int main()
 
         // Warmup: push frames through Hailo but don't record timing.
         if (warmup_count < WARMUP_FRAMES) {
-            hailo.write_frame(pkt.data, pkt.camera_id, pkt.timestamp);
-            pool.release(pkt.data);
+            hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
             ++warmup_count;
 
             if (warmup_count == WARMUP_FRAMES) {
@@ -232,10 +227,9 @@ int main()
         }
 
         // Measured frames: record write timestamp for the callback.
-        hailo.write_frame(pkt.data, pkt.camera_id, pkt.timestamp);
+        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
         const uint64_t write_done = now_ns();
 
-        pool.release(pkt.data); // Hailo owns its copy; pool buffer is free
 
         {
             std::lock_guard<std::mutex> lk(stats.mutex);
