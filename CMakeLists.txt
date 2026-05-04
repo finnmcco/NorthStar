@@ -14,6 +14,7 @@ find_package(PNG REQUIRED)
 # Define the executable
 add_executable(perception_system
     src/main.cpp
+    src/cam_downsampler.cpp
 )
 
 # Include directories
