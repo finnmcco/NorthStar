@@ -8,7 +8,7 @@
 class Camera {
 public:
     Camera(libcamera::CameraManager* camera_manager, uint8_t id, CameraQueue& queue)
-        : cm_(camera_manager), id_(id), queue_(queue), downsampler_(1920, 1080, 640, 640)
+        : cm_(camera_manager), id_(id), queue_(queue)
     {
     }
 
@@ -122,8 +122,21 @@ private:
         // Cast the void* to a byte pointer so we can copy the data
         const uint8_t* data_ptr = static_cast<const uint8_t*>(mapped);
 
-        //downsample to 640x640
-        std::vector<uint8_t> downsampled_frame = downsampler_.process(data_ptr);
+        // In on_request_completed, replace the downsample line with:
+        std::vector<uint8_t> downsampled_frame(640 * 640 * 3);
+        bool ok = downsampler_.process(
+            data_ptr,
+            1920, 1080,
+            1920 * 3,
+            downsampled_frame.data(),
+            640 * 3
+        );
+        if (!ok) {
+            munmap(mapped, plane.length);
+            request->reuse(libcamera::Request::ReuseBuffers);
+            camera_->queueRequest(request);
+            return;
+        }   
 
         // Unmap the memory-mapped region now that we've copied the data
         munmap(mapped, plane.length);

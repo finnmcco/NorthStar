@@ -1,63 +1,86 @@
+// Downsampler.cpp
 #include "cam_downsampler.hpp"
-#include <cmath>
 
-CamDownsampler::CamDownsampler(uint16_t inWidth, uint16_t inHeight, uint16_t outWidth, uint16_t outHeight)
-    :   inWidth_(inWidth), inHeight_(inHeight), outWidth_(outWidth), outHeight_(outHeight)
+#include <opencv2/core.hpp>     // cv::Mat, cv::Rect
+#include <opencv2/imgproc.hpp>  // cv::resize
+
+/*
+    Implementation notes:
+
+    We wrap the raw pointers (inData/outData) using cv::Mat "headers".
+    This does NOT copy the image data; it just creates a view.
+
+    Steps:
+    1) Validate arguments
+    2) Create cv::Mat for input with correct stride
+    3) Compute a centered square crop region
+    4) Create a cv::Mat ROI view into the input (no copy)
+    5) Create cv::Mat for output (points at outData)
+    6) Resize ROI -> output using INTER_AREA (good for downsampling)
+*/
+
+bool CamDownsampler::process(const uint8_t* inData,
+                             int inWidth,
+                             int inHeight,
+                             int inStrideBytes,
+                             uint8_t* outData,
+                             int outStrideBytes) const
 {
-    in_start_x_.resize(outWidth_);
-    in_end_x_.resize(outWidth_);
-    in_start_y_.resize(outHeight_);
-    in_end_y_.resize(outHeight_);
+    // ----------------------------
+    // 1) Basic argument validation
+    // ----------------------------
+    if (!inData || !outData)
+        return false;
 
-    float scaler = static_cast<float>(inHeight_) / static_cast<float>(outHeight_);
-    uint16_t crop_x = (inWidth_ - inHeight_) / 2;  //crop to a square based on the height (width gets chopped on each side)
-    for (uint16_t i = 0; i < outWidth_; i++){
-        in_start_x_[i] = round(crop_x + (i * scaler));
-        in_end_x_[i] = round(crop_x + ((i + 1) * scaler));
-    }
-    for (uint16_t i = 0; i < outHeight; i++){
-        in_start_y_[i] = round(i * scaler);
-        in_end_y_[i] = round((i + 1) * scaler);
-    }
-}
+    if (inWidth <= 0 || inHeight <= 0)
+        return false;
 
-std::vector<uint8_t> CamDownsampler::process(const uint8_t* dataIn){ //pass the address of the first byte in the frame
-    std::vector<uint8_t> output_data;
-    output_data.resize(outWidth_ * outHeight_ * 3); //R,G and B bytes for each pixel
+    // Input stride must be large enough to hold one row of RGB pixels
+    const int minInStride = inWidth * kChannels;
+    if (inStrideBytes < minInStride)
+        return false;
 
-    for (uint16_t out_y = 0; out_y < outHeight_; out_y++) {
-        for (uint16_t out_x = 0; out_x < outWidth_; out_x++) { //scope: ENTIRE FRAME
-            //look up the source pixel range for this output pixel
-            uint16_t src_x_start = in_start_x_[out_x];
-            uint16_t src_x_end   = in_end_x_[out_x];
-            uint16_t src_y_start = in_start_y_[out_y];
-            uint16_t src_y_end   = in_end_y_[out_y];
-            //now average all source pixels in the box
-            //defined by (src_x_start, src_y_start) to (src_x_end, src_y_end)
-            uint32_t sum_blue = 0;
-            uint32_t sum_green = 0;
-            uint32_t sum_red = 0;
-            uint32_t count = 0;
-            for (uint32_t y = src_y_start; y < src_y_end; y++){ //scope: small "box" of input pixels corresponding to an output pixel
-                //loop through every pixel in the "box" that we are averaging
-                for (uint32_t x = src_x_start; x < src_x_end; x++){ 
-                    //offset: y * inWidth_ gets the "y" part of the index within dataIn
-                    //adding x then offsets the index to the exact correct pixel entry
-                    //multiply by three to make sure we are at the start of a pixel (blue byte)
-                    size_t offset = (y * inWidth_ + x) * 3;
-                    sum_blue += dataIn[offset];
-                    sum_green += dataIn[offset + 1];
-                    sum_red += dataIn[offset + 2];
-                    count++;
-                }
-            }
-            size_t output_offset = (out_y * outWidth_ + out_x) * 3;
-            if (count == 0) continue;
-            output_data[output_offset] = sum_blue / count;
-            output_data[output_offset + 1] = sum_green / count;
-            output_data[output_offset + 2] = sum_red / count;
-        }
-    }
+    // Output stride must be large enough for 640 RGB pixels per row
+    const int minOutStride = kOutWidth * kChannels;
+    if (outStrideBytes < minOutStride)
+        return false;
 
-    return output_data;
+    // ---------------------------------------------
+    // 2) Wrap input buffer as an OpenCV cv::Mat view
+    // ---------------------------------------------
+    // CV_8UC3 = 8-bit unsigned, 3 channels (RGB)
+    // Step/stride is specified in bytes (inStrideBytes).
+    cv::Mat input(inHeight, inWidth, CV_8UC3, const_cast<uint8_t*>(inData), inStrideBytes);
+
+    // ----------------------------------------------------
+    // 3) Compute a centered square crop (remove wide edges)
+    // ----------------------------------------------------
+    // side is the largest square that fits in the image
+    const int side = (inWidth < inHeight) ? inWidth : inHeight;
+
+    // Center the square crop
+    const int x0 = (inWidth  - side) / 2;
+    const int y0 = (inHeight - side) / 2;
+
+    // Ensure ROI is inside bounds (should be by construction)
+    cv::Rect roi(x0, y0, side, side);
+
+    // -----------------------------------------
+    // 4) Create ROI view (still no data copying)
+    // -----------------------------------------
+    cv::Mat cropped = input(roi);
+
+    // ----------------------------------------------
+    // 5) Wrap output buffer as an OpenCV cv::Mat view
+    // ----------------------------------------------
+    cv::Mat output(kOutHeight, kOutWidth, CV_8UC3, outData, outStrideBytes);
+
+    // ----------------------------------------
+    // 6) Resize with INTER_AREA (downsampling)
+    // ----------------------------------------
+    // INTER_AREA is typically best for shrinking images; it behaves like
+    // pixel area relation / averaging when scaling down.
+    cv::resize(cropped, output, output.size(), 0.0, 0.0, cv::INTER_AREA);
+
+    return true;
 }
