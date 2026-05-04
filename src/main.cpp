@@ -33,12 +33,11 @@
 #include <iostream>
 #include <optional>
 
-#include "capture/camera_capture.hpp"
-#include "capture/frame_packet.hpp"
+#include "capture_controller.hpp"
+#include "frame_packet.hpp"
 #include "inference/hailo8_inference.hpp"
-#include "util/buffer_pool.hpp"
-#include "util/detection_utils.hpp"
-#include "util/queue.hpp"
+#include "detection_utils.hpp"
+#include "camera_queue.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Graceful shutdown
@@ -169,16 +168,13 @@ int main()
     // ── Camera pipeline ───────────────────────────────────────────────────────
     // Both cameras push into the same queue.  CameraCapture sets camera_id on
     // each FramePacket so downstream code can tell them apart.
-    constexpr std::size_t kBuffers       = 12; // 6 per camera
-    constexpr std::size_t kBytesPerFrame = 640 * 640 * 3;
 
     queue<FramePacket> frameQueue(8);
-    BufferPool         pool(kBuffers, kBytesPerFrame);
 
     // TODO: replace with a two-camera CaptureController once libcamera dual-
     //       stream configuration is validated.  For now a single CameraCapture
     //       exercises the full downstream pipeline.
-    CameraCapture capture(frameQueue, pool, /*fps=*/30);
+    CameraCapture capture(frameQueue, /*fps=*/30);
     if (!capture.start()) {
         std::cerr << "Failed to start camera\n";
         return 1;
@@ -194,10 +190,9 @@ int main()
 
     while (g_running && frameQueue.pop(pkt))
     {
-        hailo.write_frame(pkt.data, pkt.camera_id, pkt.timestamp);
+        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
 
         // Pool buffer can be released immediately; Hailo has its own copy.
-        pool.release(pkt.data);
     }
 
     // ── Shutdown ──────────────────────────────────────────────────────────────

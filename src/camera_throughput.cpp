@@ -6,10 +6,9 @@
 #include <numeric>
 #include <algorithm>
 
-#include "capture/camera_capture.hpp"
-#include "capture/frame_packet.hpp"
-#include "util/queue.hpp"
-#include "util/buffer_pool.hpp"
+#include "capture_controller.hpp"
+#include "frame_packet.hpp"
+#include "camera_queue.hpp"
 
 static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
@@ -21,13 +20,10 @@ int main()
 {
     std::signal(SIGINT, on_sigint);
 
-    constexpr std::size_t kBuffers       = 8;
-    constexpr std::size_t kBytesPerFrame = 640 * 640 * 3;
 
     queue<FramePacket> frameQueue(4);
-    BufferPool pool(kBuffers, kBytesPerFrame);
 
-    CameraCapture capture(frameQueue, pool, 30);
+    CameraCapture capture(frameQueue, 30);
     if (!capture.start()) {
         std::cerr << "Failed to start camera\n";
         return 1;
@@ -55,7 +51,6 @@ int main()
         first = false;
         last  = now;
 
-        pool.release(pkt.data);
         ++frame_count;
 
         // Print rolling stats every 30 frames

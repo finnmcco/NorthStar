@@ -45,7 +45,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "inference/hailo8_inference.hpp"
-#include "util/detection_utils.hpp"
+#include "detection_utils.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
