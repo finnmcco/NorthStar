@@ -3,11 +3,12 @@
 #include <camera_queue.hpp>
 #include <libcamera/libcamera.h>
 #include <sys/mman.h>
+#include "cam_downsampler.hpp"
 
 class Camera {
 public:
     Camera(libcamera::CameraManager* camera_manager, uint8_t id, CameraQueue& queue)
-        : cm_(camera_manager), id_(id), queue_(queue)
+        : cm_(camera_manager), id_(id), queue_(queue), downsampler_(1920, 1080, 640, 640)
     {
     }
 
@@ -81,6 +82,7 @@ private:
     std::vector<std::unique_ptr<libcamera::Request>> requests_;
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
     libcamera::Stream* stream_;
+    CamDownsampler downsampler_;
 
     void on_request_completed(libcamera::Request* request)
     {
@@ -120,9 +122,8 @@ private:
         // Cast the void* to a byte pointer so we can copy the data
         const uint8_t* data_ptr = static_cast<const uint8_t*>(mapped);
 
-        // Copy the raw pixel data into a vector
-        // The vector owns this memory independently of the camera buffer
-        std::vector<uint8_t> data(data_ptr, data_ptr + plane.length);
+        //downsample to 640x640
+        std::vector<uint8_t> downsampled_frame = downsampler_.process(data_ptr);
 
         // Unmap the memory-mapped region now that we've copied the data
         munmap(mapped, plane.length);
@@ -134,7 +135,7 @@ private:
         FramePacket packet;
         packet.camera_id   = id_;
         packet.timestamp_us = timestamp / 1000; //us
-        packet.data        = std::move(data);
+        packet.data        = std::move(downsampled_frame);
 
         queue_.push(std::move(packet));
 
