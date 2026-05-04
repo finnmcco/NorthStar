@@ -10,7 +10,7 @@ struct FramePacket {
 };
 
 struct IRPacket {
-    uint64_t                                    timestamp;  // nanoseconds, monotonic
+    uint64_t                                    timestamp_us;  // nanoseconds, monotonic
     std::array<float, MLX90640::PIXEL_COUNT>    temps;      // smoothed pixel temps in °C
     float                                       ambientTemp;
 };
