@@ -9,29 +9,14 @@
 #include "ir_queue.hpp"
 #include "frame_packet.hpp"
 
-/*
-    ThermalCapture
-
-    Mirrors the CameraCapture producer pattern.
-    Runs the MLX90640 sensor on a background thread,
-    packages each completed dual-subpage frame as a
-    ThermalPacket and pushes it into the supplied queue.
-
-    Usage:
-        queue<ThermalPacket> thermalQ(32);
-        ThermalCapture capture(thermalQ, "/dev/i2c-1");
-        capture.start();
-        // ... consumer thread calls thermalQ.pop(pkt) ...
-        capture.stop();
-*/
-class ThermalCapture
+class IRCapture
 {
 public:
-    ThermalCapture(IRQueue& outQueue,
+    IRCapture(IRQueue& outQueue,
                    const std::string& device = "/dev/i2c-1");
 
-    ThermalCapture(const ThermalCapture&) = delete;
-    ThermalCapture& operator=(const ThermalCapture&) = delete;
+    IRCapture(const IRCapture&) = delete;
+    IRCapture& operator=(const IRCapture&) = delete;
 
     // Initialises sensor and launches worker thread. Returns false on failure.
     bool start();
@@ -42,7 +27,7 @@ public:
 private:
     void run();
 
-    static uint64_t now_ns();
+    static uint64_t now_us();
 
     IRQueue& outQueue_;
     std::string           device_;
