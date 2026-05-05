@@ -9,8 +9,15 @@ ButtonDriver::ButtonDriver() {
     worker = std::thread([&] () {
         while (this->running) {
             auto edge = gpio::blockUntilEdge(ButtonDriver::BUTTON_PIN, gpiod::line::edge::BOTH);
-                
             if (!edge.has_value()) { continue; }
+
+            //50ms debounce:
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastEdgeTime_ < std::chrono::milliseconds(50)) {
+                continue;  //ignore edge
+            }
+            lastEdgeTime_ = now;
+
             //at this point, we know we are seeing AN edge - but we don't know if it's rising or falling
             bool val = edge.value() == gpiod::edge_event::event_type::RISING_EDGE;
             //now true == rising, false == falling
