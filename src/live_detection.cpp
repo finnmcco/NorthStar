@@ -1,18 +1,16 @@
 /*
-    live_detection.cpp
-    ══════════════════
-    Single-camera live detection demo.
+    live_detection.cpp  —  Single-camera live detection demo.
 
     Thread layout
     ─────────────
-        libcamera callback  →  frameQueue  →  main thread (write_frame)
-                                                    │
-                                       Hailo read thread (on_detection)
-                                                    │
-                                       on_detection() → imshow
+        libcamera  →  frameQueue  →  main (write_frame)
+                                           │
+                              Hailo read thread (on_detection) → imshow
 */
 
 #include "config.hpp"
+#include "camera_config.hpp"
+#include "inference_config.hpp"
 #include <atomic>
 #include <csignal>
 #include <iostream>
@@ -42,13 +40,13 @@ static void on_detection(uint8_t              camera_id,
 
     for (const auto& d : detections) {
         std::cout << "[cam" << (int)camera_id << "] "
-                  << COCO_CLASSES[d.class_id]
-                  << " conf=" << d.score
+                  << COCO_CLASSES[d.object_id]
+                  << " conf=" << d.confidence
                   << " box=("
-                  << (int)(d.x_min * 640) << ","
-                  << (int)(d.y_min * 640) << ")-("
-                  << (int)(d.x_max * 640) << ","
-                  << (int)(d.y_max * 640) << ")\n";
+                  << (int)(d.box.x_min * INPUT_WIDTH)  << ","
+                  << (int)(d.box.y_min * INPUT_HEIGHT) << ")-("
+                  << (int)(d.box.x_max * INPUT_WIDTH)  << ","
+                  << (int)(d.box.y_max * INPUT_HEIGHT) << ")\n";
     }
 
     {
@@ -65,7 +63,6 @@ int main()
 {
     std::signal(SIGINT, on_sigint);
 
-    // ── Hailo ────────────────────────────────────────────────────────────────
     Hailo8Inference hailo(DEFAULT_HEF_PATH);
     hailo.register_callback(on_detection);
 
@@ -74,9 +71,8 @@ int main()
         return 1;
     }
 
-    // ── Camera pipeline ───────────────────────────────────────────────────────
-    queue<FramePacket> frameQueue(4);
-    CameraCapture capture(frameQueue, /*fps=*/30);
+    queue<FramePacket> frameQueue(FRAME_QUEUE_DEPTH);
+    CameraCapture capture(frameQueue);
 
     if (!capture.start()) {
         std::cerr << "Failed to start camera\n";
@@ -85,15 +81,14 @@ int main()
 
     std::cout << "Live detection running — press Ctrl-C or q to quit\n";
 
-    // ── Consumer loop ─────────────────────────────────────────────────────────
     FramePacket pkt{};
 
     while (g_running && frameQueue.pop(pkt))
     {
-        // Snapshot frame as BGR for display (frames from pipeline are BGR)
         {
             std::lock_guard<std::mutex> lk(g_display_mutex);
-            cv::Mat bgr_view(640, 640, CV_8UC3, pkt.data.data(), 640 * 3);
+            cv::Mat bgr_view(INPUT_HEIGHT, INPUT_WIDTH, CV_8UC3,
+                             pkt.data.data(), INPUT_WIDTH * 3);
             bgr_view.copyTo(g_latest_bgr.emplace());
         }
 
@@ -107,16 +102,13 @@ int main()
             }
         }
 
-        int key = cv::waitKey(1);
-        if (key == 27 || key == 'q')
+        if (cv::waitKey(1) == 'q')
             g_running = false;
     }
 
-    // ── Shutdown ──────────────────────────────────────────────────────────────
     capture.stop();
     frameQueue.stop();
     hailo.stop();
     cv::destroyAllWindows();
-
     return 0;
 }

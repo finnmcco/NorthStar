@@ -169,3 +169,13 @@ add_executable(test_detection_output
     ${INFERENCE_SOURCES}
 )
 configure_target(test_detection_output)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  test_camera_inference  —  capture for N seconds, print all InferencePackets
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(test_camera_inference
+    src/test_camera_inference.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(test_camera_inference)

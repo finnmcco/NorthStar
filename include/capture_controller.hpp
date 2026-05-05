@@ -1,17 +1,18 @@
 #pragma once
+#include <chrono>
 #include <memory>
 #include <thread>
-#include <chrono>
 
 #include <libcamera/libcamera.h>
 
 #include "camera.hpp"
+#include "camera_config.hpp"
 #include "camera_queue.hpp"
 #include "frame_packet.hpp"
 
 class CameraCapture {
 public:
-    CameraCapture(queue<FramePacket>& q, int fps = 30)
+    CameraCapture(queue<FramePacket>& q, int fps = CAMERA_FPS)
         : camera_manager_(std::make_unique<libcamera::CameraManager>()),
           cam0_(camera_manager_.get(), 0, q, fps)
     {}

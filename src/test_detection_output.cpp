@@ -1,38 +1,20 @@
 /*
     test_detection_output.cpp
     ══════════════════════════
-    Runs a single real image through the full inference + NMS parsing stack and
-    prints every detection with its class label, confidence score, and pixel-
-    space bounding box.  Also saves an annotated copy of the image to disk.
+    Runs one real image through inference, prints a detection table, and saves
+    an annotated PNG.
 
-    This test is for visual verification: do the detections look right?
+    Usage:  ./test_detection_output <image_path> [hef_path]
 
-    Usage
-    ─────
-        ./test_detection_output <image_path> [hef_path]
-
-        image_path   640×640 PNG or JPEG (resized automatically if needed)
-        hef_path     default: DEFAULT_HEF_PATH (set in CMakeLists.txt)
-
-    Output
-    ──────
-    Terminal:
-        A table of all detections above CONF_THRESHOLD, sorted by confidence.
-
-    File:
-        <image_path>_annotated.png   — bounding boxes + labels drawn on the image.
-
-    Pass / fail criteria
-    ─────────────────────
-    PASS  callback fires within 5 s (zero detections is still a PASS — it means
-          the model ran cleanly; whether detections are correct is up to the user)
-    FAIL  image load error, Hailo init error, or timeout
+    PASS  callback fires within INFERENCE_TIMEOUT_S (zero detections is valid).
+    FAIL  image load error, Hailo init error, or timeout.
 */
 
 #include "config.hpp"
+#include "inference_config.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <future>
 #include <iomanip>
@@ -47,68 +29,44 @@
 #include "inference/hailo8_inference.hpp"
 #include "detection_utils.hpp"
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 static void print_result(bool pass, const std::string& detail = "")
 {
-    if (pass)
-        std::cout << "\n  [PASS]\n";
-    else
-        std::cout << "\n  [FAIL]" << (detail.empty() ? "" : "  " + detail) << "\n";
+    std::cout << (pass ? "\n  [PASS]\n"
+                       : "\n  [FAIL]" + (detail.empty() ? "" : "  " + detail) + "\n");
 }
 
-// Print a formatted detection table to stdout.
-static void print_detections(const std::vector<Detection>& dets, int img_w, int img_h)
+static void print_detections(const std::vector<Detection>& dets, int w, int h)
 {
-    if (dets.empty()) {
-        std::cout << "\n  No detections above threshold.\n";
-        return;
-    }
+    if (dets.empty()) { std::cout << "\n  No detections above threshold.\n"; return; }
 
-    // Sort by descending confidence.
     auto sorted = dets;
     std::sort(sorted.begin(), sorted.end(),
-              [](const Detection& a, const Detection& b){ return a.score > b.score; });
+              [](const Detection& a, const Detection& b){
+                  return a.confidence > b.confidence;
+              });
 
-    // Column widths
-    constexpr int CW = 20; // class name
-    constexpr int SW = 8;  // score
-    constexpr int BW = 8;  // box coord
-
+    constexpr int CW = 20, SW = 8, BW = 8;
     std::cout << "\n  "
               << std::left  << std::setw(CW) << "Class"
-              << std::right << std::setw(SW) << "Conf %"
-              << std::setw(BW) << "x1"
-              << std::setw(BW) << "y1"
-              << std::setw(BW) << "x2"
-              << std::setw(BW) << "y2"
-              << "\n";
+              << std::right << std::setw(SW)  << "Conf %"
+              << std::setw(BW) << "x1" << std::setw(BW) << "y1"
+              << std::setw(BW) << "x2" << std::setw(BW) << "y2" << "\n";
     std::cout << "  " << std::string(CW + SW + BW * 4, '-') << "\n";
 
     for (const auto& d : sorted) {
-        const int x1 = static_cast<int>(d.x_min * img_w);
-        const int y1 = static_cast<int>(d.y_min * img_h);
-        const int x2 = static_cast<int>(d.x_max * img_w);
-        const int y2 = static_cast<int>(d.y_max * img_h);
-
         std::cout << "  "
-                  << std::left  << std::setw(CW) << COCO_CLASSES[d.class_id]
+                  << std::left  << std::setw(CW) << COCO_CLASSES[d.object_id]
                   << std::right << std::setw(SW)
-                      << std::fixed << std::setprecision(1) << (d.score * 100.f)
-                  << std::setw(BW) << x1
-                  << std::setw(BW) << y1
-                  << std::setw(BW) << x2
-                  << std::setw(BW) << y2
+                      << std::fixed << std::setprecision(1) << (d.confidence * 100.f)
+                  << std::setw(BW) << static_cast<int>(d.box.x_min * w)
+                  << std::setw(BW) << static_cast<int>(d.box.y_min * h)
+                  << std::setw(BW) << static_cast<int>(d.box.x_max * w)
+                  << std::setw(BW) << static_cast<int>(d.box.y_max * h)
                   << "\n";
     }
     std::cout << "\n  Total: " << dets.size() << " detection(s)\n";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  main
-// ─────────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv)
 {
     if (argc < 2) {
@@ -117,40 +75,31 @@ int main(int argc, char** argv)
     }
 
     const std::string image_path = argv[1];
-    const std::string hef_path   = (argc >= 3) ? argv[2]
-                                               : DEFAULT_HEF_PATH;
+    const std::string hef_path   = (argc >= 3) ? argv[2] : DEFAULT_HEF_PATH;
 
     std::cout << "══════════════════════════════════════════\n"
               << "  TEST: detection output\n"
-              << "══════════════════════════════════════════\n";
-
-    // ── Load image ────────────────────────────────────────────────────────────
-    std::cout << "  Image : " << image_path << "\n";
+              << "══════════════════════════════════════════\n"
+              << "  Image : " << image_path << "\n";
 
     cv::Mat bgr_orig = cv::imread(image_path, cv::IMREAD_COLOR);
-    if (bgr_orig.empty()) {
-        print_result(false, "could not load image");
-        return 1;
-    }
+    if (bgr_orig.empty()) { print_result(false, "could not load image"); return 1; }
     std::cout << "  Original size : " << bgr_orig.cols << "×" << bgr_orig.rows << "\n";
 
     cv::Mat bgr;
-    if (bgr_orig.cols != 640 || bgr_orig.rows != 640) {
-        std::cout << "  Resizing to 640×640\n";
-        cv::resize(bgr_orig, bgr, cv::Size(640, 640));
+    if (bgr_orig.cols != INPUT_WIDTH || bgr_orig.rows != INPUT_HEIGHT) {
+        std::cout << "  Resizing to " << INPUT_WIDTH << "×" << INPUT_HEIGHT << "\n";
+        cv::resize(bgr_orig, bgr, cv::Size(INPUT_WIDTH, INPUT_HEIGHT));
     } else {
         bgr = bgr_orig;
     }
 
-    // Convert to RGB for Hailo.
     cv::Mat rgb;
     cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
     if (!rgb.isContinuous()) rgb = rgb.clone();
 
-    // ── Initialise Hailo ──────────────────────────────────────────────────────
-    std::cout << "  Model : " << hef_path << "\n";
-    std::cout << "  Initialising Hailo ... ";
-    std::cout.flush();
+    std::cout << "  Model : " << hef_path << "\n"
+              << "  Initialising Hailo ... "; std::cout.flush();
 
     Hailo8Inference hailo(hef_path);
 
@@ -159,9 +108,7 @@ int main(int argc, char** argv)
     std::atomic<bool> callback_fired{false};
 
     hailo.register_callback(
-        [&](uint8_t /*camera_id*/,
-            uint64_t /*timestamp_ns*/,
-            std::vector<std::vector<uint8_t>> output)
+        [&](uint8_t, uint64_t, std::vector<std::vector<uint8_t>> output)
         {
             bool expected = false;
             if (callback_fired.compare_exchange_strong(expected, true))
@@ -169,54 +116,38 @@ int main(int argc, char** argv)
         });
 
     if (!hailo.initialize()) {
-        std::cout << "FAILED\n";
-        print_result(false, "Hailo init error");
-        return 1;
+        std::cout << "FAILED\n"; print_result(false, "Hailo init error"); return 1;
+    }
+    std::cout << "OK\n  Running inference ... "; std::cout.flush();
+
+    if (!hailo.write_frame(rgb.data, 0, 0)) {
+        std::cout << "FAILED\n"; print_result(false, "write_frame returned false");
+        hailo.stop(); return 1;
+    }
+
+    if (result_future.wait_for(std::chrono::seconds(INFERENCE_TIMEOUT_S))
+            == std::future_status::timeout) {
+        std::cout << "TIMEOUT\n"; print_result(false, "callback timed out");
+        hailo.stop(); return 1;
     }
     std::cout << "OK\n";
-
-    // ── Run inference ─────────────────────────────────────────────────────────
-    std::cout << "  Running inference ... ";
-    std::cout.flush();
-
-    if (!hailo.write_frame(rgb.data, /*camera_id=*/0, /*timestamp_ns=*/0)) {
-        std::cout << "FAILED\n";
-        print_result(false, "write_frame returned false");
-        hailo.stop();
-        return 1;
-    }
-
-    const auto status = result_future.wait_for(std::chrono::seconds(5));
-    if (status == std::future_status::timeout) {
-        std::cout << "TIMEOUT\n";
-        print_result(false, "callback did not fire within 5 s");
-        hailo.stop();
-        return 1;
-    }
-    std::cout << "OK\n";
-
     hailo.stop();
 
-    // ── Parse and print detections ────────────────────────────────────────────
-    const auto raw_output  = result_future.get();
-    const auto detections  = parse_detections(raw_output);
-
+    const auto detections = parse_detections(result_future.get());
     print_detections(detections, bgr.cols, bgr.rows);
 
-    // ── Save annotated image ──────────────────────────────────────────────────
-    // draw_detections expects BGR.
     cv::Mat annotated = bgr.clone();
     draw_detections(annotated, detections);
 
     namespace fs = std::filesystem;
-    const fs::path input_path(image_path);
+    const fs::path p(image_path);
     const std::string out_path =
-        (input_path.parent_path() / (input_path.stem().string() + "_annotated.png")).string();
+        (p.parent_path() / (p.stem().string() + "_annotated.png")).string();
 
     if (cv::imwrite(out_path, annotated))
         std::cout << "  Annotated image saved: " << out_path << "\n";
     else
-        std::cerr << "  Warning: could not save annotated image to " << out_path << "\n";
+        std::cerr << "  Warning: could not save annotated image\n";
 
     print_result(true);
     return 0;

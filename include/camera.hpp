@@ -8,16 +8,19 @@
 
 #include "cam_downsampler.hpp"
 #include "camera_queue.hpp"
+#include "camera_config.hpp"
 #include "frame_packet.hpp"
+#include "inference_config.hpp"
 
 class Camera {
 public:
     Camera(libcamera::CameraManager* camera_manager,
            uint8_t                   id,
            queue<FramePacket>&       q,
-           int                       fps = 30)
+           int                       fps = CAMERA_FPS)
         : cm_(camera_manager), id_(id), queue_(q),
-          fps_(fps), downsampler_(1920, 1080, 640, 640)
+          fps_(fps), downsampler_(CAMERA_WIDTH, CAMERA_HEIGHT,
+                                  INPUT_WIDTH,  INPUT_HEIGHT)
     {}
 
     bool start()
@@ -28,7 +31,7 @@ public:
         auto config = camera_->generateConfiguration(
             { libcamera::StreamRole::VideoRecording });
         config->at(0).pixelFormat = libcamera::formats::BGR888;
-        config->at(0).size        = { 1920, 1080 };
+        config->at(0).size        = { CAMERA_WIDTH, CAMERA_HEIGHT };
         config->at(0).bufferCount = 6;
 
         if (config->validate() == libcamera::CameraConfiguration::Invalid) {
@@ -100,7 +103,7 @@ private:
             return;
         }
 
-        std::vector<uint8_t> dst(640 * 640 * 3);
+        std::vector<uint8_t> dst(INPUT_WIDTH * INPUT_HEIGHT * 3);
         downsampler_.process(static_cast<const uint8_t*>(mapped), dst.data());
         munmap(mapped, plane.length);
 
