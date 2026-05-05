@@ -22,8 +22,10 @@ public:
     }
 
     void start_capture(){
-        stopped_ = false;
-        camera_manager_->start();
+        //stopped_ = false;
+        //camera_manager_->start();
+        bool expected = true;
+        if (!stopped_.compare_exchange_strong(expected, false)) return;
         cam0_.start();
         cam1_.start();
         ir_capture_.start();
@@ -47,7 +49,7 @@ public:
         ir_capture_.stop();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        camera_manager_->stop();
+        //camera_manager_->stop();
 
         /*
         if (timer_thread_.joinable()) {
@@ -59,6 +61,7 @@ public:
     void shutdown() {
         cam_queue_.stop();
         ir_queue_.stop();
+        camera_manager_->stop();
     }
     
     CameraQueue& get_cam_queue() {
@@ -78,7 +81,7 @@ public:
     }
 
 private:
-    std::atomic<bool> stopped_{false};
+    std::atomic<bool> stopped_{true};
     std::thread timer_thread_;
     std::unique_ptr<libcamera::CameraManager> camera_manager_;
     CameraQueue cam_queue_;

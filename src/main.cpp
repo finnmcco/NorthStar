@@ -49,6 +49,7 @@ int main() {
 #include "button-driver.h"
 #include <unistd.h>
 #include <csignal>
+#include "gpio.h"
 
 static volatile sig_atomic_t g_should_exit = 0;
 static void on_sigint(int) { g_should_exit = 1; }
@@ -92,11 +93,59 @@ void print_stats(const std::string& name, const std::vector<uint64_t>& timestamp
               << "jitter=" << (max_us - min_us) / 1000.0 << "ms\n";
 }
 
+void print_capture_summary(std::vector<CamFrameInfo>& cam_frames,
+                            std::vector<IRFrameInfo>& ir_frames) {
+    std::cout << "\n=== Capture summary ===\n";
+
+    uint64_t earliest_us = UINT64_MAX;
+    uint64_t latest_us   = 0;
+    for (const auto& f : cam_frames) {
+        earliest_us = std::min(earliest_us, f.timestamp_us);
+        latest_us   = std::max(latest_us,   f.timestamp_us);
+    }
+    for (const auto& f : ir_frames) {
+        earliest_us = std::min(earliest_us, f.timestamp_us);
+        latest_us   = std::max(latest_us,   f.timestamp_us);
+    }
+
+    if (earliest_us != UINT64_MAX) {
+        double duration_s = (latest_us - earliest_us) / 1e6;
+        std::cout << "Capture duration: " << std::fixed << std::setprecision(2)
+                  << duration_s << "s\n";
+    }
+
+    std::vector<uint64_t> cam0_ts, cam1_ts;
+    for (const auto& f : cam_frames) {
+        if (f.camera_id == 0) cam0_ts.push_back(f.timestamp_us);
+        else                  cam1_ts.push_back(f.timestamp_us);
+    }
+    print_stats("cam0", cam0_ts);
+    print_stats("cam1", cam1_ts);
+
+    std::vector<uint64_t> ir_ts_us;
+    ir_ts_us.reserve(ir_frames.size());
+    for (const auto& f : ir_frames) ir_ts_us.push_back(f.timestamp_us);
+    print_stats("IR  ", ir_ts_us);
+
+    if (!ir_frames.empty()) {
+        std::cout << "IR ambient: first=" << ir_frames.front().ambient
+                  << "C last=" << ir_frames.back().ambient << "C\n";
+    }
+
+    std::cout << "Ready for next capture.\n\n";
+
+    // Clear buffers so the next capture starts fresh
+    cam_frames.clear();
+    ir_frames.clear();
+}
+
 int main() {
     std::signal(SIGINT, on_sigint);
+    gpio::setupGpio();
+
     std::cout << "Initialising capture controller...\n";
     CaptureController controller;
-    ButtonDriver btn;
+    button_driver::ButtonDriver btn;
 
     std::vector<CamFrameInfo> cam_frames;
     std::vector<IRFrameInfo>  ir_frames;
@@ -112,6 +161,11 @@ int main() {
     btn.registerReleaseCallback([&](){
         std::cout << "Stopping capture...\n";
         controller.stop_capture();
+
+        // Give drain threads a moment to flush any in-flight frames
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        print_capture_summary(cam_frames, ir_frames);
     });
 
     std::thread cam_drain([&]() {
@@ -132,34 +186,13 @@ int main() {
     std::cout << "Press button to capture. Ctrl+C to exit.\n";
     pause();  // or signal handling
 
-    // On exit:
+    //On exit:
     controller.stop_capture();  //ensure queues are stopped so drain threads exit
     controller.shutdown();
     cam_drain.join();
     ir_drain.join();
 
-    std::cout << "\n=== Capture summary ===\n";
-
-    // Split camera frames by ID
-    std::vector<uint64_t> cam0_ts, cam1_ts;
-    for (const auto& f : cam_frames) {
-        if (f.camera_id == 0) cam0_ts.push_back(f.timestamp_us);
-        else                  cam1_ts.push_back(f.timestamp_us);
-    }
-    print_stats("cam0", cam0_ts);
-    print_stats("cam1", cam1_ts);
-
-    // IR timestamps are in nanoseconds — convert to us for the same helper
-    std::vector<uint64_t> ir_ts_us;
-    ir_ts_us.reserve(ir_frames.size());
-    for (const auto& f : ir_frames) ir_ts_us.push_back(f.timestamp_us);
-    print_stats("IR  ", ir_ts_us);
-
-    if (!ir_frames.empty()) {
-        std::cout << "IR ambient: first=" << ir_frames.front().ambient
-                  << "C last=" << ir_frames.back().ambient << "C\n";
-    }
-
-    std::cout << "Capture complete.\n";
+    std::cout << "Goodbye!\n";
+    gpio::teardownGpio();
     return 0;
 }

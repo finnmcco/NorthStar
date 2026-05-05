@@ -13,6 +13,8 @@ public:
     }
 
     void start(){
+        requests_.clear();
+
         camera_ = cm_->cameras()[id_]; //get the correct camera (based on ID) from libcamera's list of cameras
         camera_->acquire(); //claim exclusive access to the camera - nothing else can use it from now on
 
@@ -58,20 +60,24 @@ public:
 
     void stop()
     {
+        // Disconnect the callback so no further frames are delivered
+        // after we start tearing down resources
+        camera_->requestCompleted.disconnect(this, &Camera::on_request_completed);
+
         // Stop the camera hardware from filling buffers
         // This will cancel any queued requests, triggering on_request_completed
         // one final time with RequestCancelled status for each pending request
         camera_->stop();
-
-        // Disconnect the callback so no further frames are delivered
-        // after we start tearing down resources
-        camera_->requestCompleted.disconnect(this, &Camera::on_request_completed);
 
         // Free the allocated frame buffers
         allocator_->free(stream_);
 
         // Release exclusive access to the camera
         camera_->release();
+
+        //debugging from claude:
+        camera_.reset();
+        allocator_.reset();
     }
 
 private:
