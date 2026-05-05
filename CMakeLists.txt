@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCAMERA REQUIRED libcamera)
 
+pkg_check_modules(GPIODCXX REQUIRED libgpiodcxx)
+
 # Find libpng
 find_package(PNG REQUIRED)
 
@@ -20,6 +22,8 @@ add_executable(perception_system
     src/ir_capture.cpp
     src/MLX90640.cpp
     src/ThermalUtils.cpp
+    src/button-driver.cpp
+    src/gpio.cpp
 )
 
 # Include directories
@@ -34,6 +38,9 @@ target_link_libraries(perception_system PRIVATE
     ${OpenCV_LIBS}
     PNG::PNG
 )
+
+target_include_directories(perception_system PRIVATE ${GPIODCXX_INCLUDE_DIRS})
+target_link_libraries(perception_system PRIVATE ${GPIODCXX_LIBRARIES})
 
 # libcamera requires these compile flags
 target_compile_options(perception_system PRIVATE
