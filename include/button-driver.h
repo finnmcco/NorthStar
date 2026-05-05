@@ -4,6 +4,7 @@
 #include <thread>
 #include <array>
 #include <functional>
+#include <chrono>
 #include <optional>
 
 namespace button_driver {
@@ -38,6 +39,7 @@ private:
 
     std::thread worker; 
     bool buttonStatus;
+    std::chrono::steady_clock::time_point lastEdgeTime_;
     
     std::optional<PressCallback> pressCallback;  
     std::optional<ReleaseCallback> releaseCallback; 
