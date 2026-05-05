@@ -179,3 +179,14 @@ add_executable(test_camera_inference
     ${CAMERA_SOURCES}
 )
 configure_camera_target(test_camera_inference)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  sim_session  —  full pipeline simulation with per-stage timing
+#  Usage: ./sim_session [duration_seconds]
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(sim_session
+    src/sim_session.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(sim_session)

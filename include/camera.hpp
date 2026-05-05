@@ -12,6 +12,8 @@
 #include "frame_packet.hpp"
 #include "inference_config.hpp"
 
+
+
 class Camera {
 public:
     Camera(libcamera::CameraManager* camera_manager,
@@ -30,6 +32,9 @@ public:
 
         auto config = camera_->generateConfiguration(
             { libcamera::StreamRole::VideoRecording });
+
+        // Request RGB888 — the YOLOv8n HEF expects RGB input.
+        // The IMX708 ISP handles the Bayer→RGB conversion in hardware.
         config->at(0).pixelFormat = libcamera::formats::BGR888;
         config->at(0).size        = { CAMERA_WIDTH, CAMERA_HEIGHT };
         config->at(0).bufferCount = 6;
@@ -103,14 +108,33 @@ private:
             return;
         }
 
+        // Downsample 1920×1080 → 640×640.  Channel order (RGB) is preserved.
         std::vector<uint8_t> dst(INPUT_WIDTH * INPUT_HEIGHT * 3);
         downsampler_.process(static_cast<const uint8_t*>(mapped), dst.data());
         munmap(mapped, plane.length);
 
+        // libcamera delivers BGR888 bytes regardless of format name.
+        // Swap BGR->RGB in-place so FramePacket carries RGB for YOLOv8n.
+        {
+            uint8_t* p = dst.data();
+            for (std::size_t i = 0; i < INPUT_WIDTH * INPUT_HEIGHT; ++i, p += 3) {
+                uint8_t tmp = p[0]; p[0] = p[2]; p[2] = tmp;
+            }
+        }
+
+        // libcamera delivers BGR888 bytes regardless of format name.
+        // Swap BGR->RGB in-place so FramePacket carries RGB for YOLOv8n.
+        {
+            uint8_t* p = dst.data();
+            for (std::size_t i = 0; i < INPUT_WIDTH * INPUT_HEIGHT; ++i, p += 3) {
+                uint8_t tmp = p[0]; p[0] = p[2]; p[2] = tmp;
+            }
+        }
+
         FramePacket pkt;
         pkt.camera_id = id_;
         pkt.timestamp = buf->metadata().timestamp; // nanoseconds
-        pkt.data      = std::move(dst);
+        pkt.data      = std::move(dst);            // RGB bytes
 
         queue_.push(pkt);
 
