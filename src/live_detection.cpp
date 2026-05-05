@@ -1,6 +1,13 @@
 /*
     live_detection.cpp  —  Single-camera live detection demo.
 
+    Colour note
+    ───────────
+    FramePacket::data carries RGB (from the IMX708 via libcamera RGB888).
+    Hailo receives RGB  — correct for YOLOv8n.
+    OpenCV display/annotation uses BGR — so we convert RGB→BGR when
+    snapshotting the frame for the display path.
+
     Thread layout
     ─────────────
         libcamera  →  frameQueue  →  main (write_frame)
@@ -29,7 +36,7 @@ static std::atomic<bool> g_running{true};
 static void on_sigint(int) { g_running = false; }
 
 static std::mutex             g_display_mutex;
-static std::optional<cv::Mat> g_latest_bgr;
+static std::optional<cv::Mat> g_latest_bgr;   // always BGR for OpenCV
 static std::optional<cv::Mat> g_display_frame;
 
 static void on_detection(uint8_t              camera_id,
@@ -53,7 +60,7 @@ static void on_detection(uint8_t              camera_id,
         std::lock_guard<std::mutex> lk(g_display_mutex);
         if (g_latest_bgr.has_value()) {
             cv::Mat annotated = g_latest_bgr->clone();
-            draw_detections(annotated, detections);
+            draw_detections(annotated, detections); // expects BGR — correct
             g_display_frame = std::move(annotated);
         }
     }
@@ -85,19 +92,23 @@ int main()
 
     while (g_running && frameQueue.pop(pkt))
     {
+        // pkt.data is RGB (from IMX708 via libcamera RGB888).
+        // Hailo write — send RGB directly, as YOLOv8n expects RGB.
+        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
+
+        // Display snapshot — OpenCV imshow/draw_detections expect BGR,
+        // so convert RGB→BGR before storing.
         {
             std::lock_guard<std::mutex> lk(g_display_mutex);
-            cv::Mat bgr_view(INPUT_HEIGHT, INPUT_WIDTH, CV_8UC3,
+            cv::Mat rgb_view(INPUT_HEIGHT, INPUT_WIDTH, CV_8UC3,
                              pkt.data.data(), INPUT_WIDTH * 3);
-            bgr_view.copyTo(g_latest_bgr.emplace());
+            rgb_view.copyTo(g_latest_bgr.emplace());
         }
-
-        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
 
         {
             std::lock_guard<std::mutex> lk(g_display_mutex);
             if (g_display_frame.has_value()) {
-                cv::imshow("Live Detection", *g_display_frame);
+                cv::imshow("Live Detection", *g_display_frame); // BGR — correct
                 g_display_frame.reset();
             }
         }
