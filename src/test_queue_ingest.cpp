@@ -60,7 +60,7 @@ int main(int argc, char** argv)
     Hailo8Inference hailo(hef_path);
 
     hailo.register_callback(
-        [&](uint8_t camera_id, uint64_t, std::vector<uint8_t> output)
+        [&](uint8_t camera_id, uint64_t, std::vector<std::vector<uint8_t>> output)
         {
             bool ok = true;
             if (camera_id != 0) { std::cerr << "  unexpected camera_id\n"; ok = false; }

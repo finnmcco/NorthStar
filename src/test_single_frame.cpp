@@ -111,7 +111,7 @@ int main(int argc, char** argv)
     Hailo8Inference hailo(hef_path);
 
     // Use a promise so the main thread can block until the callback fires.
-    std::promise<std::vector<uint8_t>> result_promise;
+    std::promise<std::vector<std::vector<uint8_t>>> result_promise;
     auto result_future = result_promise.get_future();
 
     // The callback fires on the Hailo read thread.
@@ -120,11 +120,11 @@ int main(int argc, char** argv)
     hailo.register_callback(
         [&](uint8_t /*camera_id*/,
             uint64_t /*timestamp_ns*/,
-            std::vector<uint8_t> output)
+            std::vector<std::vector<uint8_t>> outputs)
         {
             bool expected = false;
             if (callback_fired.compare_exchange_strong(expected, true))
-                result_promise.set_value(std::move(output));
+                result_promise.set_value(std::move(outputs));
         });
 
     if (!hailo.initialize()) {
@@ -162,9 +162,9 @@ int main(int argc, char** argv)
     std::cout << "received\n";
 
     // ── Validate output ───────────────────────────────────────────────────────
-    const auto output = result_future.get();
+    const auto outputs = result_future.get();
     const std::size_t expected_size = hailo.output_frame_size();
-    const std::size_t actual_size   = output.size();
+    const std::size_t actual_size   = outputs.empty() ? 0 : outputs[0].size();
 
     std::cout << "  Output buffer size   : " << actual_size << " bytes";
     if (actual_size == expected_size) {

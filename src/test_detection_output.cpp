@@ -154,14 +154,14 @@ int main(int argc, char** argv)
 
     Hailo8Inference hailo(hef_path);
 
-    std::promise<std::vector<uint8_t>> result_promise;
+    std::promise<std::vector<std::vector<uint8_t>>> result_promise;
     auto result_future = result_promise.get_future();
     std::atomic<bool> callback_fired{false};
 
     hailo.register_callback(
         [&](uint8_t /*camera_id*/,
             uint64_t /*timestamp_ns*/,
-            std::vector<uint8_t> output)
+            std::vector<std::vector<uint8_t>> output)
         {
             bool expected = false;
             if (callback_fired.compare_exchange_strong(expected, true))
@@ -199,7 +199,7 @@ int main(int argc, char** argv)
 
     // ── Parse and print detections ────────────────────────────────────────────
     const auto raw_output  = result_future.get();
-    const auto detections  = parse_nms_output(raw_output);
+    const auto detections  = parse_detections(raw_output);
 
     print_detections(detections, bgr.cols, bgr.rows);
 

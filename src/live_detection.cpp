@@ -36,9 +36,9 @@ static std::optional<cv::Mat> g_display_frame;
 
 static void on_detection(uint8_t              camera_id,
                           uint64_t             /*timestamp_ns*/,
-                          std::vector<uint8_t> output)
+                          std::vector<std::vector<uint8_t>> output)
 {
-    auto detections = parse_nms_output(output);
+    auto detections = parse_detections(output);
 
     for (const auto& d : detections) {
         std::cout << "[cam" << (int)camera_id << "] "

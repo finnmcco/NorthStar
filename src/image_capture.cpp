@@ -63,7 +63,6 @@ static cv::Mat load_frame(const fs::path& p)
 
 ImageCapture::ImageCapture(const std::string&  image_root,
                            queue<FramePacket>& q,
-                           BufferPool&         pool,
                            int                 fps,
                            bool                loop)
     : image_root_(image_root), queue_(q), pool_(pool), fps_(fps), loop_(loop)

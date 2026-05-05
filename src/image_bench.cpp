@@ -162,11 +162,11 @@ int main(int argc, char** argv)
     hailo.register_callback(
         [&stats](uint8_t /*camera_id*/,
                  uint64_t /*timestamp_ns*/,
-                 std::vector<uint8_t> raw_output)
+                 std::vector<std::vector<uint8_t>> raw_output)
         {
             const uint64_t now = now_ns();
 
-            auto detections = parse_nms_output(raw_output);
+            auto detections = parse_detections(raw_output);
 
             std::lock_guard<std::mutex> lk(stats.mutex);
 
@@ -209,7 +209,6 @@ int main(int argc, char** argv)
     constexpr std::size_t kBytesPerFrame = 640 * 640 * 3;
 
     queue<FramePacket> frameQueue(8);
-    BufferPool         pool(kBuffers, kBytesPerFrame);
 
     // loop=false: stop after one pass through the image set.
     ImageCapture capture(image_root, frameQueue, pool, fps, /*loop=*/false);
@@ -230,7 +229,7 @@ int main(int argc, char** argv)
 
         // Warmup: push frames through Hailo but don't record timing.
         if (warmup_count < WARMUP_FRAMES) {
-            hailo.write_frame(pkt.data, pkt.camera_id, pkt.timestamp);
+            hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
             pool.release(pkt.data);
             ++warmup_count;
 
@@ -243,7 +242,7 @@ int main(int argc, char** argv)
         }
 
         const uint64_t write_start = now_ns();
-        hailo.write_frame(pkt.data, pkt.camera_id, pkt.timestamp);
+        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
         const uint64_t write_done  = now_ns();
 
         pool.release(pkt.data);
