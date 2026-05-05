@@ -22,6 +22,8 @@ public:
     }
 
     void start_capture(){
+        stopped_ = false;
+        camera_manager_->start();
         cam0_.start();
         cam1_.start();
         ir_capture_.start();
@@ -29,10 +31,12 @@ public:
         //wait for the cameras to wake up fully
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+        /*
         timer_thread_ = std::thread([this] {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             stop_capture();
         });
+        */
     }
 
     void stop_capture() {
@@ -41,15 +45,20 @@ public:
         cam0_.stop();
         cam1_.stop();
         ir_capture_.stop();
-        cam_queue_.stop();
-        ir_queue_.stop();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         camera_manager_->stop();
 
+        /*
         if (timer_thread_.joinable()) {
          timer_thread_.detach();
         }
+        */
+    }
+
+    void shutdown() {
+        cam_queue_.stop();
+        ir_queue_.stop();
     }
     
     CameraQueue& get_cam_queue() {

@@ -46,6 +46,12 @@ int main() {
 #include <algorithm>
 #include <numeric>
 #include "capture_controller.hpp"
+#include "button-driver.h"
+#include <unistd.h>
+#include <csignal>
+
+static volatile sig_atomic_t g_should_exit = 0;
+static void on_sigint(int) { g_should_exit = 1; }
 
 struct CamFrameInfo {
     uint8_t  camera_id;
@@ -87,16 +93,26 @@ void print_stats(const std::string& name, const std::vector<uint64_t>& timestamp
 }
 
 int main() {
+    std::signal(SIGINT, on_sigint);
     std::cout << "Initialising capture controller...\n";
     CaptureController controller;
+    ButtonDriver btn;
 
     std::vector<CamFrameInfo> cam_frames;
     std::vector<IRFrameInfo>  ir_frames;
     cam_frames.reserve(500);
     ir_frames.reserve(50);
 
-    std::cout << "Starting capture...\n";
-    controller.start_capture();
+    btn.registerPressCallback([&](){
+        std::cout << "Starting capture...\n";
+        controller.start_capture();
+
+    });
+
+    btn.registerReleaseCallback([&](){
+        std::cout << "Stopping capture...\n";
+        controller.stop_capture();
+    });
 
     std::thread cam_drain([&]() {
         auto& q = controller.get_cam_queue();
@@ -112,10 +128,15 @@ int main() {
         }
     });
 
-    std::this_thread::sleep_for(std::chrono::seconds(6));
+    // Wait for SIGINT to exit
+    std::cout << "Press button to capture. Ctrl+C to exit.\n";
+    pause();  // or signal handling
 
-    if (cam_drain.joinable()) cam_drain.join();
-    if (ir_drain.joinable())  ir_drain.join();
+    // On exit:
+    controller.stop_capture();  //ensure queues are stopped so drain threads exit
+    controller.shutdown();
+    cam_drain.join();
+    ir_drain.join();
 
     std::cout << "\n=== Capture summary ===\n";
 
