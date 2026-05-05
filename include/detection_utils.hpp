@@ -1,67 +1,47 @@
 #pragma once
 #include <cstdint>
 #include <vector>
+#include <string>
 
 #include <opencv2/core.hpp>
 
-/*
-    detection_utils.hpp
-    ════════════════════
-    Utilities shared by every binary that consumes Hailo NMS output.
-
-    Detection
-    ─────────
-    Normalised bounding box in [0,1] × [0,1] image space (x-axis = width).
-    Multiply by the image dimensions to get pixel coordinates.
-
-    parse_nms_output(raw)
-    ─────────────────────
-    Parses the raw byte buffer produced by Hailo's NMS post-processor.
-
-    HailoRT NMS output format (HAILO_FORMAT_ORDER_HAILO_NMS):
-        For each of the N_CLASSES classes:
-            float32  bbox_count                  ← number of valid boxes
-            float32  y_min, x_min, y_max, x_max, score  × MAX_BBOXES
-
-    MAX_BBOXES is inferred from the buffer size so this function is independent
-    of the compile-time model parameters.
-
-    draw_detections(img, dets)
-    ──────────────────────────
-    Draws bounding boxes and class labels onto a BGR OpenCV Mat in-place.
-
-    COCO_CLASSES
-    ─────────────
-    80-entry label table indexed by class_id.
-
-    CONF_THRESHOLD
-    ──────────────
-    Detections below this confidence are discarded by parse_nms_output().
-    Change here and recompile — no cmake re-run needed.
-*/
+// ─────────────────────────────────────────────────────────────────────────────
+//  Tunable thresholds
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr float CONF_THRESHOLD = 0.25f;  // minimum confidence
+static constexpr float NMS_IOU_THRESH = 0.45f;  // NMS overlap threshold
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Tunable
-// ─────────────────────────────────────────────────────────────────────────────
-static constexpr float CONF_THRESHOLD = 0.45f;
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Detection result
+//  Detection result  (normalised coordinates, [0,1] × [0,1])
 // ─────────────────────────────────────────────────────────────────────────────
 struct Detection {
     uint8_t class_id;
     float   score;
-    float   x_min, y_min, x_max, y_max; // normalised [0,1]
+    float   x_min, y_min, x_max, y_max;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  API
+//  Unified entry point — auto-dispatches by output stream count
+//
+//  outputs.size() == 1  →  NMS built-in model (e.g. yolov8s_h8.hef)
+//                          calls parse_nms_output(outputs[0])
+//
+//  outputs.size() == 6  →  Raw-tensor model   (e.g. yolov8n.hef)
+//                          runs DFL decode + sigmoid + CPU NMS
+//                          on the six NHWC float32 tensors
+//
+//  The correct model is selected by setting NORTHSTAR_MODEL_FILENAME in
+//  config.hpp — no other code changes are needed.
 // ─────────────────────────────────────────────────────────────────────────────
-std::vector<Detection> parse_nms_output(const std::vector<uint8_t>& raw);
+std::vector<Detection> parse_detections(
+    const std::vector<std::vector<uint8_t>>& outputs);
 
+// Low-level parsers (exposed so tests can call them directly)
+std::vector<Detection> parse_nms_output (const std::vector<uint8_t>& raw);
+std::vector<Detection> parse_yolov8_raw (const std::vector<std::vector<uint8_t>>& outputs);
+
+// Draw boxes + labels onto a BGR OpenCV Mat.
 void draw_detections(cv::Mat& bgr_img, const std::vector<Detection>& dets);
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  COCO label table
-// ─────────────────────────────────────────────────────────────────────────────
+// 80 COCO class labels.
 extern const char* const COCO_CLASSES[80];

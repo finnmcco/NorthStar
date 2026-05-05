@@ -149,11 +149,11 @@ int main()
     hailo.register_callback(
         [&stats](uint8_t /*camera_id*/,
                  uint64_t /*timestamp_ns*/,
-                 std::vector<uint8_t> raw_output)
+                 std::vector<std::vector<uint8_t>> raw_output)
         {
             const uint64_t now = now_ns();
 
-            auto detections = parse_nms_output(raw_output);
+            auto detections = parse_detections(raw_output);
 
             std::lock_guard<std::mutex> lk(stats.mutex);
 

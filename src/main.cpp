@@ -152,11 +152,11 @@ int main()
     hailo.register_callback(
         [&matcher](uint8_t camera_id,
                    uint64_t timestamp_ns,
-                   std::vector<uint8_t> raw_output)
+                   std::vector<std::vector<uint8_t>> raw_output)
         {
             // Parse NMS on the Hailo read thread, then hand off to matcher.
             // Matcher is only ever called from this thread so no locking needed.
-            auto detections = parse_nms_output(raw_output);
+            auto detections = parse_detections(raw_output);
             matcher.on_result(camera_id, timestamp_ns, std::move(detections));
         });
 

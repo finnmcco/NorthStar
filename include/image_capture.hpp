@@ -42,7 +42,6 @@ class ImageCapture
 public:
     ImageCapture(const std::string&  image_root,
                  queue<FramePacket>& q,
-                 BufferPool&         pool,
                  int                 fps  = 30,
                  bool                loop = false);
 
@@ -60,7 +59,6 @@ public:
 private:
     std::string         image_root_;
     queue<FramePacket>& queue_;
-    BufferPool&         pool_;
     int                 fps_;
     bool                loop_;
 
