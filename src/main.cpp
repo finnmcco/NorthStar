@@ -3,8 +3,8 @@
     ════════════════════════════════════════════
 
     Full pipeline:
-      1. Camera pushes 640×640 BGR frames into a shared frameQueue.
-      2. Consumer thread pops frames and writes them to Hailo for inference.
+      1. CaptureController pushes 640×640 BGR frames into CameraQueue.
+      2. Consumer thread pops frames and writes BGR directly to Hailo.
       3. Hailo read thread fires callback with detections + camera_id + timestamp.
       4. StereoMatcher pairs cam0 and cam1 results by timestamp.
       5. on_stereo_pair() receives the matched pair for depth / thermal / TTS.
@@ -12,20 +12,27 @@
     Thread layout
     ─────────────
         libcamera (cam0 & cam1)  ──┐
-                                   ├─→  frameQueue  →  consumer  →  Hailo write
-        libcamera (cam1)         ──┘                                      │
-                                                        Hailo read thread─┘
-                                                                  │
-                                                        StereoMatcher → on_stereo_pair()
+                                   ├─→  CameraQueue  →  cam_thread  →  Hailo write
+        libcamera (cam1)         ──┘                                         │
+                                                         Hailo read thread ──┘
+                                                                   │
+                                                         StereoMatcher → on_stereo_pair()
+
+    Colour
+    ──────
+    camera.hpp configures libcamera as BGR888.  The compiled model expects BGR,
+    so frames are passed directly to write_frame() with no conversion.
 */
 
 #include "config.hpp"
-#include "camera_config.hpp"
+#include "colour.hpp"
 #include <atomic>
 #include <csignal>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <optional>
+#include <thread>
 
 #include "capture_controller.hpp"
 #include "camera_queue.hpp"
@@ -33,8 +40,18 @@
 #include "inference/hailo8_inference.hpp"
 #include "detection_utils.hpp"
 
-static std::atomic<bool> g_running{true};
-static void on_sigint(int) { g_running = false; }
+// Two milliseconds — frames from synchronised cameras should arrive within ~1 ms.
+static constexpr uint64_t STEREO_MATCH_TOLERANCE_NS = 2'000'000ULL;
+
+static std::atomic<bool>  g_running{true};
+static CaptureController* g_controller_ptr = nullptr;
+
+static void on_sigint(int)
+{
+    g_running = false;
+    if (g_controller_ptr)
+        g_controller_ptr->stop_capture();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  StereoMatcher
@@ -136,23 +153,23 @@ int main()
         return 1;
     }
 
-    queue<FramePacket> frameQueue(FRAME_QUEUE_DEPTH);
+    CaptureController controller;
+    g_controller_ptr = &controller;
 
-    // TODO: replace with two-camera CaptureController once dual-stream is validated.
-    CameraCapture capture(frameQueue);
-    if (!capture.start()) {
-        std::cerr << "Failed to start camera\n";
-        return 1;
-    }
-
+    controller.start_capture();
     std::cout << "NorthStar pipeline running — press Ctrl-C to quit\n";
 
-    FramePacket pkt{};
-    while (g_running && frameQueue.pop(pkt))
-        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
+    // Consumer: pop BGR frames, feed directly to Hailo (model expects BGR).
+    // Exits naturally when CameraQueue::stop() drains and pop() returns nullopt.
+    std::thread cam_thread([&]() {
+        auto& cam_q = controller.get_cam_queue();
+        while (auto pkt = cam_q.pop()) {
+            hailo_prepare(pkt->data);
+            hailo.write_frame(pkt->data.data(), pkt->camera_id, pkt->timestamp_us * 1000ULL);
+        }
+    });
 
-    capture.stop();
-    frameQueue.stop();
+    cam_thread.join();
     hailo.stop();
 
     std::cout << "Pipeline stopped.\n";

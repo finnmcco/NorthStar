@@ -10,6 +10,9 @@
     ─────
         ./sim_session [duration_seconds]   default: 5
 
+    Note: CaptureController has an internal 5-second capture timer.  If
+    duration_seconds exceeds 5 the camera will stop at 5 s regardless.
+
     Output — two sections
     ─────────────────────
     1. Live progress: one line per callback as it arrives.
@@ -51,10 +54,15 @@
         inter_frame_ms   time between successive frames arriving at the consumer
         inference_ms     write_frame() accepted → callback fires  (pure Hailo)
         e2e_ms           frame dequeued → callback fires  (queue wait + Hailo)
+
+    Colour
+    ──────
+    camera.hpp configures libcamera as BGR888.  The compiled model expects BGR,
+    so frames are passed directly to write_frame() with no conversion.
 */
 
 #include "config.hpp"
-#include "camera_config.hpp"
+#include "colour.hpp"
 #include "inference_config.hpp"
 
 #include <algorithm>
@@ -67,6 +75,7 @@
 #include <numeric>
 #include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "capture_controller.hpp"
@@ -79,8 +88,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-static std::atomic<bool> g_running{true};
-static void on_sigint(int) { g_running = false; }
+static std::atomic<bool>  g_running{true};
+static CaptureController* g_controller_ptr = nullptr;
+
+static void on_sigint(int)
+{
+    g_running = false;
+    if (g_controller_ptr)
+        g_controller_ptr->stop_capture();
+}
 
 using Clock = std::chrono::steady_clock;
 using Ms    = std::chrono::duration<double, std::milli>;
@@ -164,18 +180,10 @@ int main(int argc, char** argv)
               << "══════════════════════════════════════════\n\n";
 
     // ── Session storage ───────────────────────────────────────────────────────
-    // completed_records is written by the Hailo read thread and read by
-    // main after hailo.stop() — no concurrent access at print time.
     std::mutex                   records_mutex;
     std::vector<FrameRecord>     completed_records;
     std::queue<FrameRecord*>     pending_records;  // FIFO: consumer → callback
     completed_records.reserve(duration_s * 40);
-
-    // All FrameRecords are allocated in the consumer loop (main thread) and
-    // their addresses pushed into pending_records.  The callback pops them
-    // and fills in callback_ns + packet, then moves to completed_records.
-    // Because Hailo processes frames in-order and only main calls write_frame,
-    // the FIFO is safe with just a mutex.
 
     // ── Hailo ────────────────────────────────────────────────────────────────
     Hailo8Inference hailo(hef_path);
@@ -194,7 +202,7 @@ int main(int argc, char** argv)
 
             std::lock_guard<std::mutex> lk(records_mutex);
 
-            if (pending_records.empty()) return; // shouldn't happen
+            if (pending_records.empty()) return;
 
             FrameRecord* rec  = pending_records.front();
             pending_records.pop();
@@ -204,7 +212,6 @@ int main(int argc, char** argv)
 
             const int n = static_cast<int>(completed_records.size()) + 1;
 
-            // Live progress line
             std::cout << "  [" << std::setw(4) << n << "]"
                       << "  inf=" << std::fixed << std::setprecision(1)
                       << rec->inference_ms() << "ms"
@@ -222,13 +229,9 @@ int main(int argc, char** argv)
     }
 
     // ── Camera ────────────────────────────────────────────────────────────────
-    queue<FramePacket> frameQueue(FRAME_QUEUE_DEPTH);
-    CameraCapture capture(frameQueue);
-
-    if (!capture.start()) {
-        std::cerr << "Failed to start camera\n";
-        return 1;
-    }
+    CaptureController controller;
+    g_controller_ptr = &controller;
+    controller.start_capture();
 
     std::cout << "Session started — capturing for " << duration_s
               << " s (Ctrl-C to stop early)\n\n";
@@ -237,31 +240,33 @@ int main(int argc, char** argv)
     const auto deadline  = Clock::now() + std::chrono::seconds(duration_s);
     uint32_t   frame_idx = 0;
 
-    FramePacket pkt{};
-    while (g_running && Clock::now() < deadline)
-    {
-        if (!frameQueue.pop(pkt)) break;
+    auto& cam_q = controller.get_cam_queue();
 
-        const uint64_t dq_ns    = now_ns();
+    while (g_running && Clock::now() < deadline) {
+        auto pkt = cam_q.pop();
+        if (!pkt) break;
 
-        auto* rec           = new FrameRecord();
-        rec->frame_idx      = ++frame_idx;
-        rec->camera_ts_ns   = pkt.timestamp;
-        rec->dequeue_ns     = dq_ns;
+        const uint64_t dq_ns = now_ns();
+
+        auto* rec         = new FrameRecord();
+        rec->frame_idx    = ++frame_idx;
+        rec->camera_ts_ns = pkt->timestamp_us * 1000ULL;
+        rec->dequeue_ns   = dq_ns;
 
         {
             std::lock_guard<std::mutex> lk(records_mutex);
             pending_records.push(rec);
         }
 
-        hailo.write_frame(pkt.data.data(), pkt.camera_id, pkt.timestamp);
+        // Prepare colour order per config.hpp (NORTHSTAR_HAILO_BGR).
+        hailo_prepare(pkt->data);
+        hailo.write_frame(pkt->data.data(), pkt->camera_id, pkt->timestamp_us * 1000ULL);
         rec->write_ns = now_ns();
     }
 
     // ── Shutdown ──────────────────────────────────────────────────────────────
     g_running = false;
-    capture.stop();
-    frameQueue.stop();
+    controller.stop_capture();
     hailo.stop(); // joins read thread — all callbacks have fired by here
 
     // ── Report ────────────────────────────────────────────────────────────────
@@ -273,7 +278,6 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // Compute wall-clock duration from first dequeue to last callback
     const double wall_s =
         to_ms(completed_records.back().callback_ns -
               completed_records.front().dequeue_ns) / 1000.0;
@@ -347,7 +351,6 @@ int main(int argc, char** argv)
     }
 
     // ── Object summary ────────────────────────────────────────────────────────
-    // Per-class: how many frames contained at least one detection of that class
     std::vector<int> frames_with_class(N_CLASSES, 0);
     for (const auto& r : completed_records) {
         std::vector<bool> seen(N_CLASSES, false);

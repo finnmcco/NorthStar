@@ -57,9 +57,11 @@ set(INFERENCE_SOURCES
     src/detection_utils.cpp
 )
 
-# Capture — real libcamera pipeline
 set(CAMERA_SOURCES
     src/cam_downsampler.cpp
+    src/ir_capture.cpp
+    src/MLX90640.cpp
+    src/ThermalUtils.cpp
 )
 
 # Image folder capture — no libcamera, used by image_bench
@@ -170,15 +172,7 @@ add_executable(test_detection_output
 )
 configure_target(test_detection_output)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  test_camera_inference  —  capture for N seconds, print all InferencePackets
-# ─────────────────────────────────────────────────────────────────────────────
-add_executable(test_camera_inference
-    src/test_camera_inference.cpp
-    ${INFERENCE_SOURCES}
-    ${CAMERA_SOURCES}
-)
-configure_camera_target(test_camera_inference)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  sim_session  —  full pipeline simulation with per-stage timing
@@ -190,3 +184,13 @@ add_executable(sim_session
     ${CAMERA_SOURCES}
 )
 configure_camera_target(sim_session)
+
+
+add_executable(test_colour_bgr src/test_colour_bgr.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
+configure_camera_target(test_colour_bgr)
+
+add_executable(test_colour_rgb src/test_colour_rgb.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
+configure_camera_target(test_colour_rgb)
+
+add_executable(save_annotated src/save_annotated.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
+configure_camera_target(save_annotated)
