@@ -24,6 +24,8 @@ public:
     // Signals the worker to stop and joins the thread. Safe to call multiple times.
     void stop();
 
+    std::optional<IRPacket> get_latest() const;
+
 private:
     void run();
 
@@ -33,4 +35,7 @@ private:
     std::string           device_;
     std::atomic<bool>     running_{false};
     std::thread           worker_;
+
+    mutable std::mutex latest_mutex_;
+    IRPacket latest_;
 };

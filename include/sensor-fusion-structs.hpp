@@ -26,7 +26,3 @@ enum class Visibility {
     Cam1only
 };
 
-struct BoundingBox {
-    float x0, y0;  
-    float x1, y1;  
-};

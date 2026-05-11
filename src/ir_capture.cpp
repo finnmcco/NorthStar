@@ -50,6 +50,11 @@ void IRCapture::run()
             MLX90640::ChessInterpolator::interpolateBlend(
                 raw, pkt.temps.data(), 0.4f);
 
+            {
+                std::lock_guard<std::mutex> lock(latest_mutex_);
+                latest_ = pkt;   // copy
+            }
+
             outQueue_.push(std::move(pkt));
 
             got[0] = false;
@@ -69,4 +74,9 @@ uint64_t IRCapture::now_us()
     clock_gettime(CLOCK_BOOTTIME, &ts);
     return static_cast<uint64_t>(ts.tv_sec) * 1'000'000ULL
          + static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
+}
+
+std::optional<IRPacket> IRCapture::get_latest() const {
+    std::lock_guard<std::mutex> lock(latest_mutex_);
+    return latest_;   //returns nullopt if no packets yet
 }
