@@ -37,7 +37,7 @@ int main() {
     return 0;
 }
 */
-
+/*
 #include <iostream>
 #include <iomanip>
 #include <thread>
@@ -195,4 +195,37 @@ int main() {
     std::cout << "Goodbye!\n";
     gpio::teardownGpio();
     return 0;
+}
+*/
+
+#include "distance_estimator.hpp"
+#include <iostream>
+#include <optional>
+
+int main(){
+    DistanceEstimator distance(1003, 0.14f);
+    BoundingBox personCam0;
+    BoundingBox personCam1;
+
+    personCam0.x_min = 0.36f;
+    personCam0.y_min = 0.49f;
+    personCam0.x_max = 0.51f;
+    personCam0.y_max = 0.62f;
+
+    personCam1.x_min = 0.42f;
+    personCam1.y_min = 0.43f;
+    personCam1.x_max = 0.55f;
+    personCam1.y_max = 0.57f;
+
+    std::optional<float> dist = distance.compute(personCam0, personCam1);
+
+    if (dist) {
+        std::cout << "Distance: " << *dist << " m\n";
+    } 
+    else {    
+        std::cout << "Distance: (no valid disparity)\n";
+    }
+
+    return 0;
+
 }

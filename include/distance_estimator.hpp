@@ -19,7 +19,7 @@ public:
         float centre1px = centre1 * 640;
 
         //get the disparity
-        float disparity = centre0px - centre1px; //assuming cam0 is the left one
+        float disparity = centre1px - centre0px; //cam1 is the left one
 
         if (disparity < 1.0f) { //avoid absurdly large distances
             return std::nullopt; 
