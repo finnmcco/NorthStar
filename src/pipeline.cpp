@@ -31,7 +31,27 @@ void Pipeline::stop() {
 }
 
 // ---------------------------------------------------------------------------
-// Capture thread: ALSA → left ch + gain → resample 48k→16k → queue
+// resolve_object_id
+// Walks object_list_ to find the index of word, then returns the
+// corresponding entry from object_ids_.  Returns 0 if the word is not found
+// or if object_ids_ has no entry for that index.
+// ---------------------------------------------------------------------------
+
+uint8_t Pipeline::resolve_object_id(const std::string& word) const {
+    auto it = std::find(cfg_.object_list.begin(), cfg_.object_list.end(), word);
+    if (it == cfg_.object_list.end()) return 0;
+
+    const std::size_t idx = static_cast<std::size_t>(
+        std::distance(cfg_.object_list.begin(), it));
+
+    if (idx < cfg_.object_ids.size())
+        return cfg_.object_ids[idx];
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Capture thread: ALSA -> left ch + gain -> resample 48k->16k -> queue
 // ---------------------------------------------------------------------------
 
 void Pipeline::capture_loop() {
@@ -62,17 +82,8 @@ void Pipeline::capture_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// Inference thread: queue → Vosk → debounce → callbacks
+// Inference thread: queue -> Vosk -> debounce -> callbacks
 // ---------------------------------------------------------------------------
-
-uint8_t Pipeline::resolve_object_id(const std::string& word) const {
-    auto it = std::find(cfg_.object_list.begin(), cfg_.object_list.end(), word);
-    if (it == cfg_.object_list.end()) return 0;
-    const std::size_t idx = static_cast<std::size_t>(
-        std::distance(cfg_.object_list.begin(), it));
-    if (idx < cfg_.object_ids.size()) return cfg_.object_ids[idx];
-    return 0;
-}
 
 void Pipeline::inference_loop() {
     try {
@@ -82,10 +93,12 @@ void Pipeline::inference_loop() {
         std::string last_word;
         int         streak = 0;
 
+        // Resolves object_id, fires on_detection, then fires on_intent if set.
+        // Both callbacks always receive the same object_id for consistency.
         auto fire = [&](DetectionResult& result) {
             result.object_id = resolve_object_id(result.word);
             cfg_.on_detection(result);
-            if (cfg_.on_intent)
+            if (cfg_.on_intent && result.is_final)
                 cfg_.on_intent(result.object_id);
         };
 

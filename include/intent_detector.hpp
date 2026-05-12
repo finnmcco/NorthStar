@@ -1,5 +1,5 @@
 #pragma once
-#include "config.hpp"
+#include "audio_config.hpp"
 
 #include <vosk_api.h>
 #include <cstdint>
@@ -9,7 +9,7 @@
 
 struct DetectionResult {
     std::string word;
-    uint8_t     object_id = 0;  // COCO class index (0–79); populated by Pipeline
+    uint8_t     object_id = 0;  // COCO class index (0-79); populated by Pipeline
     bool        is_final;       // true = utterance boundary confirmed by Vosk
 };
 
@@ -22,6 +22,9 @@ struct DetectionResult {
 //   Final   — committed after Vosk detects trailing silence. High confidence.
 //   Partial — mid-utterance hypothesis. Lower confidence, lower latency.
 //             Debounce is applied by Pipeline before firing the callback.
+//
+// Note: object_id is always 0 here. Pipeline sets it via resolve_object_id()
+// after a word is matched, before firing either callback.
 
 class IntentDetector {
 public:
@@ -34,7 +37,6 @@ public:
 
     // Feed one chunk of Config::VOSK_RATE int16 audio.
     // Returns a DetectionResult on match, std::nullopt otherwise.
-    // Note: object_id is left at 0; Pipeline sets it from object_ids config.
     std::optional<DetectionResult> feed(const std::vector<int16_t>& audio);
 
     void reset();

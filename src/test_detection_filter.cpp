@@ -27,7 +27,7 @@
       7.  Reverse order pair: cam1 first, then cam0
       8.  Timestamp too far apart: no pair
       9.  One camera missing target: no pair
-     10.  Multiple detections in frame: highest confidence wins
+     10.  Multiple detections in frame: all target detections passed through, non-target excluded
      11.  Pre-buffer replay produces stereo pairs
      12.  Sequential pairs all emitted
      13.  Reset clears all state
@@ -252,33 +252,36 @@ static void test_09_one_camera_missing_target()
            fired == 0, "fired=" + std::to_string(fired));
 }
 
-// 10. Multiple detections in frame — highest confidence selected
-static void test_10_highest_confidence_selected()
+// 10. Multiple detections in frame — all target detections passed through
+static void test_10_all_target_detections_passed()
 {
     FilteredInferencePair result{};
     DetectionFilter f([&](FilteredInferencePair p) { result = p; });
     f.on_intent(TARGET_ID);
 
-    // cam0: two detections of the target at different confidences
+    // cam0: two detections of the target + one of a different class
     InferencePacket cam0;
     cam0.camera_id = 0;
     cam0.timestamp = 1'000'000ULL;
-    Detection d_low;  d_low.object_id = TARGET_ID; d_low.confidence  = 0.50f;
-    d_low.box  = { 0.0f, 0.0f, 0.2f, 0.2f };
-    Detection d_high; d_high.object_id = TARGET_ID; d_high.confidence = 0.95f;
-    d_high.box = { 0.4f, 0.4f, 0.9f, 0.9f };
-    cam0.detections = { d_low, d_high };
+    Detection d1; d1.object_id = TARGET_ID; d1.confidence = 0.50f;
+    d1.box = { 0.0f, 0.0f, 0.2f, 0.2f };
+    Detection d2; d2.object_id = TARGET_ID; d2.confidence = 0.95f;
+    d2.box = { 0.4f, 0.4f, 0.9f, 0.9f };
+    Detection d3; d3.object_id = 7;         d3.confidence = 0.80f;  // wrong class
+    d3.box = { 0.1f, 0.1f, 0.3f, 0.3f };
+    cam0.detections = { d1, d2, d3 };
 
     f.on_inference_packet(cam0);
     f.on_inference_packet(make_packet(1, cam0.timestamp + SYNC_DELTA, TARGET_ID));
 
-    bool box_is_high_conf =
-        result.bbox_cam0.x_min == d_high.box.x_min &&
-        result.bbox_cam0.x_max == d_high.box.x_max;
+    // Both target detections should be in cam0_detections, the wrong class excluded.
+    bool ok = result.cam0_detections.size() == 2
+           && result.cam1_detections.size() == 1;
 
-    report("10 highest confidence detection selected",
-           box_is_high_conf,
-           "x_min=" + std::to_string(result.bbox_cam0.x_min));
+    report("10 all target detections passed, non-target excluded",
+           ok,
+           "cam0=" + std::to_string(result.cam0_detections.size()) +
+           " cam1=" + std::to_string(result.cam1_detections.size()));
 }
 
 // 11. Pre-buffer replay produces stereo pairs
@@ -401,7 +404,7 @@ int main()
     test_07_reverse_order_pair();
     test_08_timestamp_too_far();
     test_09_one_camera_missing_target();
-    test_10_highest_confidence_selected();
+    test_10_all_target_detections_passed();
     test_11_pre_buffer_replay_pairs();
     test_12_sequential_pairs();
     test_13_reset_clears_state();

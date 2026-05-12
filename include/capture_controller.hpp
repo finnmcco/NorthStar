@@ -43,15 +43,12 @@ public:
 
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-        // Timer thread: sleep 5 s (or until woken by stop_capture()),
-        // then call stop_capture(). It does NOT join itself — the destructor
-        // handles that from the main thread.
+
         timer_thread_ = std::thread([this] {
             std::unique_lock<std::mutex> lk(timer_mutex_);
-            timer_cv_.wait_for(lk, std::chrono::seconds(5));
+            timer_cv_.wait(lk); 
             lk.unlock();
             stop_capture();
-            // Thread exits here. Destructor will join() it.
         });
     }
 

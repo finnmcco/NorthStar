@@ -6,39 +6,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Model configuration
-#
-#  Copy your .hef file into model_inf/ then set NORTHSTAR_HEF_FILE to its name.
-#  Override on the command line if needed:
-#      cmake -DNORTHSTAR_HEF_FILE=yolov8n_h8.hef ..
-#
-#  DEFAULT_HEF_PATH is injected as a compile definition so every binary
-#  resolves the model relative to the repo root at build time — no hardcoded
-#  system paths anywhere in the source.
 # ─────────────────────────────────────────────────────────────────────────────
 set(NORTHSTAR_MODEL_DIR "${CMAKE_SOURCE_DIR}/model_inf"
-    CACHE PATH   "Directory containing .hef model files")
+    CACHE PATH "Directory containing .hef model files")
 
-# Only the directory is injected here.  The filename is set in src/config.hpp —
-# edit that file and run make to switch models, no cmake re-run needed.
 add_compile_definitions(
     NORTHSTAR_MODEL_DIR="${NORTHSTAR_MODEL_DIR}"
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+find_package(OpenCV    REQUIRED COMPONENTS core imgproc imgcodecs highgui)
+find_package(Threads   REQUIRED)
 
-find_package(PkgConfig   REQUIRED)
-find_package(OpenCV      REQUIRED COMPONENTS core imgproc imgcodecs highgui)
-find_package(Threads     REQUIRED)
-
+# Camera
 pkg_check_modules(LIBCAMERA REQUIRED libcamera)
 
-# HailoRT is installed to a non-standard prefix on the Pi AI HAT+.
-# Adjust HAILO_ROOT if your installation differs.
-set(HAILO_ROOT "/usr/local/hailo" CACHE PATH "HailoRT installation root")
-find_library(HAILO_LIB hailort HINTS "${HAILO_ROOT}/lib" REQUIRED)
-find_path(HAILO_INCLUDE hailo/hailort.hpp HINTS "${HAILO_ROOT}/include" REQUIRED)
+# Hailo — libs at /usr/lib, headers at /usr/include on this Pi
+find_library(HAILO_LIB  hailort   HINTS /usr/lib               REQUIRED)
+find_path   (HAILO_INCLUDE hailo/hailort.hpp HINTS /usr/include REQUIRED)
+
+# Audio — ALSA, libsamplerate, Vosk
+pkg_check_modules(ALSA       REQUIRED alsa)
+pkg_check_modules(SAMPLERATE REQUIRED samplerate)
+
+find_library(VOSK_LIB   vosk       HINTS /usr/local/lib /usr/lib REQUIRED)
+find_path   (VOSK_INCLUDE vosk_api.h HINTS /usr/local/include /usr/include REQUIRED)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Common include directories
+#  Include directories
 # ─────────────────────────────────────────────────────────────────────────────
 set(COMMON_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -47,11 +45,15 @@ set(COMMON_INCLUDES
     ${OpenCV_INCLUDE_DIRS}
 )
 
+set(AUDIO_INCLUDES
+    ${VOSK_INCLUDE}
+    ${ALSA_INCLUDE_DIRS}
+    ${SAMPLERATE_INCLUDE_DIRS}
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Source groups
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Inference — always needed
 set(INFERENCE_SOURCES
     src/inference/hailo8_inference.cpp
     src/detection_utils.cpp
@@ -64,14 +66,19 @@ set(CAMERA_SOURCES
     src/ThermalUtils.cpp
 )
 
-# Image folder capture — no libcamera, used by image_bench
-set(IMAGE_CAPTURE_SOURCES
-    src/image_capture.cpp
+set(AUDIO_SOURCES
+    src/audio_capture.cpp
+    src/resampler.cpp
+    src/intent_detector.cpp
+    src/pipeline.cpp
+    src/detection_filter.cpp
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Helper macro: apply common settings to a target
+#  Helper macros
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Hailo + OpenCV only
 macro(configure_target TARGET)
     target_include_directories(${TARGET} PRIVATE ${COMMON_INCLUDES})
     target_compile_options(${TARGET} PRIVATE -Wall -Wextra -O2)
@@ -82,6 +89,7 @@ macro(configure_target TARGET)
     )
 endmacro()
 
+# Hailo + OpenCV + libcamera
 macro(configure_camera_target TARGET)
     configure_target(${TARGET})
     target_include_directories(${TARGET} PRIVATE ${LIBCAMERA_INCLUDE_DIRS})
@@ -89,18 +97,57 @@ macro(configure_camera_target TARGET)
     target_link_libraries(${TARGET} PRIVATE ${LIBCAMERA_LIBRARIES})
 endmacro()
 
+# Hailo + ALSA + samplerate + Vosk (no libcamera)
+macro(configure_audio_target TARGET)
+    target_include_directories(${TARGET} PRIVATE
+        ${COMMON_INCLUDES}
+        ${AUDIO_INCLUDES}
+    )
+    target_compile_options(${TARGET} PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(${TARGET} PRIVATE
+        ${HAILO_LIB}
+        ${OpenCV_LIBS}
+        ${VOSK_LIB}
+        ${ALSA_LIBRARIES}
+        ${SAMPLERATE_LIBRARIES}
+        Threads::Threads
+    )
+endmacro()
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  perception_system  —  main pipeline (dual camera + Hailo)
+#  perception_system  —  full camera + Hailo pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(perception_system
     src/main.cpp
     ${INFERENCE_SOURCES}
     ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
 )
 configure_camera_target(perception_system)
+target_include_directories(perception_system PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(perception_system PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  live_detection  —  single-camera live demo
+#  mic_pipeline  —  microphone + Vosk + DetectionFilter
+#
+#  Standalone test of the audio side: speak a COCO object name, verify
+#  on_intent fires with the correct object_id.
+#  Note: save the mic main as src/mic_pipeline_main.cpp
+#
+#  Usage: ./mic_pipeline ../model/vosk-model-small-en-us-0.15 cat dog person
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(mic_pipeline
+    src/mic_pipeline_main.cpp
+    ${AUDIO_SOURCES}
+)
+configure_audio_target(mic_pipeline)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Other camera targets
 # ─────────────────────────────────────────────────────────────────────────────
 add_executable(live_detection
     src/live_detection.cpp
@@ -109,9 +156,6 @@ add_executable(live_detection
 )
 configure_camera_target(live_detection)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  benchmark_detection  —  throughput benchmark with real camera
-# ─────────────────────────────────────────────────────────────────────────────
 add_executable(benchmark_detection
     src/benchmark_detection.cpp
     ${INFERENCE_SOURCES}
@@ -119,65 +163,6 @@ add_executable(benchmark_detection
 )
 configure_camera_target(benchmark_detection)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  image_bench  —  throughput benchmark from image folder (no libcamera)
-#
-#  Usage: ./image_bench <image_root> [fps]
-#
-#  image_root/
-#      cam0/   <- 640x640 PNG/JPEG images for camera 0
-#      cam1/   <- 640x640 PNG/JPEG images for camera 1 (optional)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Tests  (no libcamera dependency — run on the Pi without cameras attached)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# test_single_frame
-# Sends one synthetic frame through Hailo and checks the callback fires with
-# a correctly-sized output buffer.
-# Usage: ./test_single_frame [hef_path] [image_path]
-add_executable(test_single_frame
-    src/test_single_frame.cpp
-    ${INFERENCE_SOURCES}
-)
-configure_target(test_single_frame)
-
-# test_queue_ingest
-# Pushes N synthetic frames into a queue, runs the consumer loop, and asserts
-# that exactly N callbacks arrive with valid data.
-# Usage: ./test_queue_ingest [hef_path] [n_frames]
-add_executable(test_queue_ingest
-    src/test_queue_ingest.cpp
-    ${INFERENCE_SOURCES}
-)
-configure_target(test_queue_ingest)
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  camera_throughput  —  raw camera frame rate test (no Hailo)
-# ─────────────────────────────────────────────────────────────────────────────
-add_executable(camera_throughput
-    src/camera_throughput.cpp
-    ${CAMERA_SOURCES}
-)
-configure_camera_target(camera_throughput)
-
-# test_detection_output
-# Runs one real image through inference and prints a detection table + saves
-# an annotated PNG.  For visual verification of model correctness.
-# Usage: ./test_detection_output <image_path> [hef_path]
-add_executable(test_detection_output
-    src/test_detection_output.cpp
-    ${INFERENCE_SOURCES}
-)
-configure_target(test_detection_output)
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  sim_session  —  full pipeline simulation with per-stage timing
-#  Usage: ./sim_session [duration_seconds]
-# ─────────────────────────────────────────────────────────────────────────────
 add_executable(sim_session
     src/sim_session.cpp
     ${INFERENCE_SOURCES}
@@ -185,12 +170,42 @@ add_executable(sim_session
 )
 configure_camera_target(sim_session)
 
-
-add_executable(test_colour_bgr src/test_colour_bgr.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
-configure_camera_target(test_colour_bgr)
-
-add_executable(test_colour_rgb src/test_colour_rgb.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
-configure_camera_target(test_colour_rgb)
-
-add_executable(save_annotated src/save_annotated.cpp ${INFERENCE_SOURCES} ${CAMERA_SOURCES})
+add_executable(save_annotated
+    src/save_annotated.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+)
 configure_camera_target(save_annotated)
+
+
+add_executable(test_detection_filter
+    src/test_detection_filter.cpp
+    src/detection_filter.cpp
+)
+configure_target(test_detection_filter)
+
+add_executable(test_pipeline_logic
+    src/test_pipeline_logic.cpp
+)
+configure_target(test_pipeline_logic)
+
+add_executable(test_save_pairs
+    src/test_save_pairs.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
+)
+configure_camera_target(test_save_pairs)
+target_include_directories(test_save_pairs PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(test_save_pairs PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+)
+
+add_executable(capture_frames
+    src/capture_frames.cpp
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(capture_frames)
+ 
