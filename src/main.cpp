@@ -1,177 +1,171 @@
 /*
-    main.cpp  —  NorthStar perception pipeline
-    ════════════════════════════════════════════
-
-    Full pipeline:
-      1. CaptureController pushes 640×640 BGR frames into CameraQueue.
-      2. Consumer thread pops frames and writes BGR directly to Hailo.
-      3. Hailo read thread fires callback with detections + camera_id + timestamp.
-      4. StereoMatcher pairs cam0 and cam1 results by timestamp.
-      5. on_stereo_pair() receives the matched pair for depth / thermal / TTS.
-
-    Thread layout
-    ─────────────
-        libcamera (cam0 & cam1)  ──┐
-                                   ├─→  CameraQueue  →  cam_thread  →  Hailo write
-        libcamera (cam1)         ──┘                                         │
-                                                         Hailo read thread ──┘
-                                                                   │
-                                                         StereoMatcher → on_stereo_pair()
-
-    Colour
-    ──────
-    camera.hpp configures libcamera as BGR888.  The compiled model expects BGR,
-    so frames are passed directly to write_frame() with no conversion.
+    main.cpp  —  NorthStar integrated perception pipeline
 */
 
 #include "config.hpp"
 #include "colour.hpp"
-#include <atomic>
-#include <csignal>
-#include <cstdint>
-#include <functional>
-#include <iostream>
-#include <optional>
-#include <thread>
-
 #include "capture_controller.hpp"
 #include "camera_queue.hpp"
-#include "frame_packet.hpp"
-#include "inference/hailo8_inference.hpp"
+#include "detection_filter.hpp"
 #include "detection_utils.hpp"
+#include "coco_lookup.hpp"
+#include "pipeline.hpp"
+#include "inference/hailo8_inference.hpp"
 
-// Two milliseconds — frames from synchronised cameras should arrive within ~1 ms.
-static constexpr uint64_t STEREO_MATCH_TOLERANCE_NS = 2'000'000ULL;
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <string>
+#include <thread>
+#include <vector>
 
-static std::atomic<bool>  g_running{true};
+std::atomic<bool> g_running{true};
 static CaptureController* g_controller_ptr = nullptr;
 
-static void on_sigint(int)
+static void on_signal(int)
 {
     g_running = false;
     if (g_controller_ptr)
         g_controller_ptr->stop_capture();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  StereoMatcher
-//  Called exclusively from the Hailo read thread — no locking needed.
-// ─────────────────────────────────────────────────────────────────────────────
-class StereoMatcher
+static void on_filtered_pair(FilteredInferencePair pair)
 {
-public:
-    struct Result {
-        uint8_t                camera_id;
-        uint64_t               timestamp_ns;
-        std::vector<Detection> detections;
-    };
+    std::printf("\n[pair]  object_id=%-3d  ts=%-12llu  cam0=%zu det  cam1=%zu det\n",
+                pair.object_id,
+                static_cast<unsigned long long>(pair.timestamp_avg),
+                pair.cam0_detections.size(),
+                pair.cam1_detections.size());
+    
+    
+    for (const auto& d : pair.cam0_detections)
+        std::printf("  cam0  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                    d.confidence, d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
 
-    struct StereoPair {
-        Result cam0;
-        Result cam1;
-    };
+    for (const auto& d : pair.cam1_detections)
+        std::printf("  cam1  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                    d.confidence, d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
 
-    using PairCallback = std::function<void(StereoPair)>;
-
-    explicit StereoMatcher(PairCallback cb) : cb_(std::move(cb)) {}
-
-    void on_result(uint8_t camera_id, uint64_t timestamp_ns,
-                   std::vector<Detection> detections)
-    {
-        Result r{ camera_id, timestamp_ns, std::move(detections) };
-
-        if (camera_id == 0) {
-            if (pending_cam1_ && match(timestamp_ns, pending_cam1_->timestamp_ns)) {
-                cb_(StereoPair{ std::move(r), std::move(*pending_cam1_) });
-                pending_cam1_.reset();
-            } else {
-                pending_cam0_ = std::move(r);
-            }
-        } else {
-            if (pending_cam0_ && match(timestamp_ns, pending_cam0_->timestamp_ns)) {
-                cb_(StereoPair{ std::move(*pending_cam0_), std::move(r) });
-                pending_cam0_.reset();
-            } else {
-                pending_cam1_ = std::move(r);
-            }
-        }
-    }
-
-private:
-    static bool match(uint64_t a, uint64_t b)
-    {
-        return (a > b ? a - b : b - a) < STEREO_MATCH_TOLERANCE_NS;
-    }
-
-    PairCallback          cb_;
-    std::optional<Result> pending_cam0_;
-    std::optional<Result> pending_cam1_;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Downstream stubs — replace as subsystems are implemented
-// ─────────────────────────────────────────────────────────────────────────────
-static void on_stereo_pair(StereoMatcher::StereoPair pair)
-{
-    // TODO: stereo depth estimation using fixed baseline + bounding box centroids
-    // TODO: thermal camera lookup (MLX90640) for object region
-    // TODO: TTS output via MAX98357A
-
-    std::cout << "[stereo pair] cam0 ts=" << pair.cam0.timestamp_ns
-              << "  cam1 ts=" << pair.cam1.timestamp_ns << "\n";
-
-    for (const auto& d : pair.cam0.detections)
-        std::cout << "  [cam0] " << COCO_CLASSES[d.object_id]
-                  << " conf=" << d.confidence << "\n";
-
-    for (const auto& d : pair.cam1.detections)
-        std::cout << "  [cam1] " << COCO_CLASSES[d.object_id]
-                  << " conf=" << d.confidence << "\n";
+    std::fflush(stdout);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  main
-// ─────────────────────────────────────────────────────────────────────────────
-int main()
+int main(int argc, char* argv[])
 {
-    std::signal(SIGINT, on_sigint);
-
-    Hailo8Inference hailo(DEFAULT_HEF_PATH);
-    StereoMatcher   matcher(on_stereo_pair);
-
-    hailo.register_callback(
-        [&matcher](uint8_t camera_id,
-                   uint64_t timestamp_ns,
-                   std::vector<std::vector<uint8_t>> raw_output)
-        {
-            auto detections = parse_detections(raw_output);
-            matcher.on_result(camera_id, timestamp_ns, std::move(detections));
-        });
-
-    if (!hailo.initialize()) {
-        std::cerr << "Failed to initialise Hailo\n";
+    if (argc < 3) {
+        std::fprintf(stderr,
+            "Usage: %s <vosk_model_dir> <word1> [word2 ...]\n"
+            "  e.g. %s ../model_inf/vosk-model-small-en-us-0.15 cat dog person cup\n",
+            argv[0], argv[0]);
         return 1;
     }
 
+    std::signal(SIGINT,  on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    // ── DetectionFilter ───────────────────────────────────────────────────────
+    DetectionFilter filter(on_filtered_pair);
+
+    // ── Mic pipeline ──────────────────────────────────────────────────────────
+    Pipeline::Config mic_cfg;
+    mic_cfg.model_path = argv[1];
+
+    for (int i = 2; i < argc; ++i) {
+        const std::string word = argv[i];
+        const uint8_t     id   = coco_id_for_word(word);
+
+        if (id == 255) {
+            std::fprintf(stderr,
+                "Warning: \"%s\" is not a COCO class — will never match a detection.\n",
+                word.c_str());
+        } else {
+            std::printf("  Registered: \"%s\" -> COCO id %d\n", word.c_str(), id);
+        }
+
+        mic_cfg.object_list.push_back(word);
+        mic_cfg.object_ids.push_back(id);
+    }
+
+    mic_cfg.on_detection = [](const DetectionResult& r) {
+        std::printf("  [mic] %-12s  id=%-3d  (%s)\n",
+                    r.word.c_str(), r.object_id,
+                    r.is_final ? "final" : "partial");
+        std::fflush(stdout);
+    };
+
+    mic_cfg.on_intent = [&filter](uint8_t id) {
+        std::printf("  [mic] arming filter -> COCO id %d\n", id);
+        filter.on_intent(id);
+    };
+
+    // ── Hailo inference ───────────────────────────────────────────────────────
+    Hailo8Inference hailo(DEFAULT_HEF_PATH);
+
+    hailo.register_callback(
+        [&filter](uint8_t camera_id,
+                  uint64_t timestamp_ns,
+                  std::vector<std::vector<uint8_t>> raw_output)
+        {
+            auto detections = parse_detections(raw_output);
+
+            std::printf("[hailo] cam=%d  ts=%llu  detections=%zu",
+                        camera_id,
+                        static_cast<unsigned long long>(timestamp_ns),
+                        detections.size());
+            for (const auto& d : detections)
+                std::printf("  {id=%d conf=%.2f}", d.object_id, d.confidence);
+            std::printf("\n");
+            std::fflush(stdout);
+
+            InferencePacket pkt;
+            pkt.camera_id  = camera_id;
+            pkt.timestamp  = timestamp_ns;
+            pkt.detections = std::move(detections);
+            filter.on_inference_packet(std::move(pkt));
+        });
+
+    if (!hailo.initialize()) {
+        std::fprintf(stderr, "Failed to initialise Hailo\n");
+        return 1;
+    }
+
+    // ── Camera capture ────────────────────────────────────────────────────────
     CaptureController controller;
     g_controller_ptr = &controller;
-
     controller.start_capture();
-    std::cout << "NorthStar pipeline running — press Ctrl-C to quit\n";
 
-    // Consumer: pop BGR frames, feed directly to Hailo (model expects BGR).
-    // Exits naturally when CameraQueue::stop() drains and pop() returns nullopt.
+    // ── Camera consumer thread: pop frames → Hailo ────────────────────────────
     std::thread cam_thread([&]() {
         auto& cam_q = controller.get_cam_queue();
+        int frame_count = 0;
         while (auto pkt = cam_q.pop()) {
+            ++frame_count;
+            if (frame_count % 30 == 1)
+                std::printf("[cam] frame %d  camera_id=%d\n",
+                            frame_count, pkt->camera_id);
+            std::fflush(stdout);
             hailo_prepare(pkt->data);
-            hailo.write_frame(pkt->data.data(), pkt->camera_id, pkt->timestamp_us * 1000ULL);
+            hailo.write_frame(pkt->data.data(), pkt->camera_id,
+                              pkt->timestamp_us * 1000ULL);
         }
+        std::printf("[cam] thread exited — %d frames total\n", frame_count);
     });
 
+    // ── Mic pipeline ──────────────────────────────────────────────────────────
+    Pipeline mic_pipeline(std::move(mic_cfg));
+    mic_pipeline.start();
+
+    std::printf("\nNorthStar running — speak a registered object name.\n");
+    std::printf("Ctrl-C to quit.\n\n");
+
+    while (g_running)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // ── Shutdown ──────────────────────────────────────────────────────────────
+    mic_pipeline.stop();
     cam_thread.join();
     hailo.stop();
 
-    std::cout << "Pipeline stopped.\n";
+    std::printf("\nMic queue drops: %zu\n", mic_pipeline.queue_drops());
     return 0;
 }
