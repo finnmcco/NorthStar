@@ -6,7 +6,7 @@
 
 namespace Config {
 
-inline constexpr const char*       ALSA_DEVICE    = "hw:2,0";
+inline constexpr const char*       ALSA_DEVICE    = "hw:1,0";
 
 // Capture — googlevoicehat driver native format
 inline constexpr unsigned int      CAP_RATE       = 48000;
