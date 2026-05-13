@@ -34,6 +34,8 @@
 #include "button-driver.h"
 #include "gpio.h"
 #include "inference/hailo8_inference.hpp"
+#include "frame_buffer.hpp"
+#include "stereo_distance.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -54,6 +56,10 @@ static std::atomic<uint64_t> g_ir_frames_consumed{0};
 static std::atomic<uint64_t> g_hailo_callbacks{0};
 static std::atomic<uint64_t> g_pairs_emitted{0};
 
+static FrameBuffer g_frame_buf_cam0;
+static FrameBuffer g_frame_buf_cam1;
+static StereoDepthEstimator* g_depth_ptr = nullptr;
+
 static void on_signal(int /*sig*/)
 {
     g_running = false;
@@ -65,6 +71,7 @@ static void on_signal(int /*sig*/)
 static void on_filtered_pair(FilteredInferencePair pair)
 {
     const uint64_t n = ++g_pairs_emitted;
+
     std::printf("\n[filter] PAIR #%llu  object_id=%-3d  ts=%-12llu  "
                 "cam0=%zu det  cam1=%zu det\n",
                 static_cast<unsigned long long>(n),
@@ -73,16 +80,58 @@ static void on_filtered_pair(FilteredInferencePair pair)
                 pair.cam0_detections.size(),
                 pair.cam1_detections.size());
 
-    for (const auto& d : pair.cam0_detections)
-        std::printf("[filter]   cam0  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
-                    d.confidence,
-                    d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
+    if (pair.cam0_detections.empty() || pair.cam1_detections.empty()) {
+        std::printf("[filter] pair missing detections on a side; skipping depth\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    // Highest-confidence cam0 detection (filter already guarantees these are
+    // all of the target class).
+    const Detection* best_cam0 = &pair.cam0_detections.front();
+    for (const auto& d : pair.cam0_detections) {
+        if (d.confidence > best_cam0->confidence) best_cam0 = &d;
+    }
+
+    std::printf("[filter]   cam0  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                best_cam0->confidence,
+                best_cam0->box.x_min, best_cam0->box.y_min,
+                best_cam0->box.x_max, best_cam0->box.y_max);
 
     for (const auto& d : pair.cam1_detections)
         std::printf("[filter]   cam1  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
                     d.confidence,
                     d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
 
+    // ── Retrieve frames closest to this pair's timestamp ────────────────────
+    cv::Mat left  = g_frame_buf_cam0.find_closest(pair.timestamp_avg);
+    cv::Mat right = g_frame_buf_cam1.find_closest(pair.timestamp_avg);
+
+    if (left.empty() || right.empty()) {
+        std::printf("[depth] no frame in buffer for pair ts=%llu  "
+                    "(cam0_empty=%d cam1_empty=%d)\n",
+                    static_cast<unsigned long long>(pair.timestamp_avg),
+                    left.empty(), right.empty());
+        std::fflush(stdout);
+        return;
+    }
+
+    // ── Compute stereo depth at the cam0 bounding box ───────────────────────
+    if (!g_depth_ptr) {
+        std::printf("[depth] estimator not initialised\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    auto depth_m = g_depth_ptr->compute(left, right, best_cam0->box);
+
+    if (depth_m) {
+        std::printf("[depth] Z = %.2f m  (object_id=%d)\n",
+                    *depth_m, pair.object_id);
+    } else {
+        std::printf("[depth] could not compute (textureless / out of range / "
+                    "bbox outside rectified image)\n");
+    }
     std::fflush(stdout);
 }
 
@@ -149,10 +198,12 @@ int main(int argc, char* argv[])
         filter.on_intent(id);
     };
 
+    
     // ── Hailo inference ──────────────────────────────────────────────────────
     std::printf("[main] creating Hailo inference (hef: %s)\n", DEFAULT_HEF_PATH);
     Hailo8Inference hailo(DEFAULT_HEF_PATH);
 
+    /*
     hailo.register_callback(
         [&filter](uint8_t camera_id,
                   uint64_t timestamp_ns,
@@ -178,6 +229,42 @@ int main(int argc, char* argv[])
 
             filter.on_inference_packet(std::move(pkt));
         });
+    */
+
+    hailo.register_callback(
+    [&filter](uint8_t camera_id,
+              uint64_t timestamp_ns,
+              std::vector<std::vector<uint8_t>> raw_output)
+    {
+        const uint64_t n = ++g_hailo_callbacks;
+
+        InferencePacket pkt;
+        pkt.camera_id  = camera_id;
+        pkt.timestamp  = timestamp_ns;
+        pkt.detections = parse_detections(raw_output);
+
+        // If filter is armed, check whether any detection matches the
+        // target class and log each match individually. This gives a
+        // clear per-frame view of how often each camera sees the object.
+        if (filter.is_armed()) {
+            const uint8_t target = filter.target_object_id();
+            int matches = 0;
+            for (const auto& d : pkt.detections) {
+                if (d.object_id == target) {
+                    ++matches;
+                    std::printf("[hailo] HIT cb#%llu  cam=%d  target=%d  "
+                                "conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                                static_cast<unsigned long long>(n),
+                                camera_id, target, d.confidence,
+                                d.box.x_min, d.box.y_min,
+                                d.box.x_max, d.box.y_max);
+                }
+            }
+            if (matches > 0) std::fflush(stdout);
+        }
+
+        filter.on_inference_packet(std::move(pkt));
+    });
 
     std::printf("[main] initialising Hailo...\n");
     if (!hailo.initialize()) {
@@ -193,6 +280,11 @@ int main(int argc, char* argv[])
     CaptureController controller;
     g_controller_ptr = &controller;
 
+    std::printf("[main] loading stereo calibration\n");
+    StereoDepthEstimator depth("../cam_calibration/stereo_calib_640.yaml");  // adjust path as needed
+    g_depth_ptr = &depth;
+    std::printf("[main] stereo calibration loaded: baseline=%.3f m\n", depth.baseline_m());
+
     // ── Camera consumer thread ───────────────────────────────────────────────
     std::printf("[main] spawning cam consumer thread\n");
     std::thread cam_thread([&]() {
@@ -200,11 +292,18 @@ int main(int argc, char* argv[])
         auto& cam_q = controller.get_cam_queue();
         while (auto pkt = cam_q.pop()) {
             const uint64_t n = ++g_cam_frames_consumed;
+            const uint64_t ts_ns = pkt->timestamp_us * 1000ULL;
+
+            // Store a copy of the BGR frame in the per-camera buffer BEFORE
+            // hailo_prepare() (which mutates the data in place).
+            cv::Mat frame(640, 640, CV_8UC3, pkt->data.data());
+            if (pkt->camera_id == 0) g_frame_buf_cam0.push(ts_ns, frame.clone());
+            else                     g_frame_buf_cam1.push(ts_ns, frame.clone());
 
             hailo_prepare(pkt->data);
             hailo.write_frame(pkt->data.data(),
                               pkt->camera_id,
-                              pkt->timestamp_us * 1000ULL);
+                              ts_ns);
 
             if (n % 60 == 1) {
                 std::printf("[cam] consumed frame #%llu  cam=%d  qsize=%zu\n",
