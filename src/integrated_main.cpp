@@ -1,0 +1,359 @@
+/*
+    integrated_main.cpp  —  NorthStar end-to-end perception pipeline
+
+    Subsystems:
+        Button        — gates camera + IR capture (held = on, released = off)
+        Sensor Ingest — CaptureController (camera + IR)
+        Inference     — Hailo8Inference (always-on, processes frames as they arrive)
+        Mic Intent    — Pipeline (always-on, Vosk ASR → COCO id)
+        Filter        — DetectionFilter (correlates cam0/cam1 detections)
+
+    Output: FilteredInferencePair structs printed to stdout (placeholder for
+            downstream stereo distance estimator).
+
+    Log prefixes:
+        [main]       lifecycle / shutdown
+        [button]     press / release events
+        [cap]        capture controller state
+        [cam]        camera consumer thread
+        [ir]         IR consumer thread
+        [hailo]      Hailo inference callbacks
+        [mic]        mic pipeline + intent
+        [filter]     filtered pair output
+*/
+
+#include "capture_controller.hpp"
+#include "camera_queue.hpp"
+#include "coco_lookup.hpp"
+#include "colour.hpp"
+#include "config.hpp"
+#include "detection_filter.hpp"
+#include "detection_utils.hpp"
+#include "inference_packet.hpp"
+#include "pipeline.hpp"
+#include "button-driver.h"
+#include "gpio.h"
+#include "inference/hailo8_inference.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <string>
+#include <thread>
+
+
+// ─── Globals for signal handling ─────────────────────────────────────────────
+std::atomic<bool>  g_running{true};
+static CaptureController* g_controller_ptr = nullptr;
+std::atomic<bool> mic_armed{false};
+
+// ─── Counters for periodic reporting ─────────────────────────────────────────
+static std::atomic<uint64_t> g_cam_frames_consumed{0};
+static std::atomic<uint64_t> g_ir_frames_consumed{0};
+static std::atomic<uint64_t> g_hailo_callbacks{0};
+static std::atomic<uint64_t> g_pairs_emitted{0};
+
+static void on_signal(int /*sig*/)
+{
+    g_running = false;
+    if (g_controller_ptr) g_controller_ptr->stop_capture();
+}
+
+
+// ─── FilteredInferencePair print callback ───────────────────────────────────
+static void on_filtered_pair(FilteredInferencePair pair)
+{
+    const uint64_t n = ++g_pairs_emitted;
+    std::printf("\n[filter] PAIR #%llu  object_id=%-3d  ts=%-12llu  "
+                "cam0=%zu det  cam1=%zu det\n",
+                static_cast<unsigned long long>(n),
+                pair.object_id,
+                static_cast<unsigned long long>(pair.timestamp_avg),
+                pair.cam0_detections.size(),
+                pair.cam1_detections.size());
+
+    for (const auto& d : pair.cam0_detections)
+        std::printf("[filter]   cam0  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                    d.confidence,
+                    d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
+
+    for (const auto& d : pair.cam1_detections)
+        std::printf("[filter]   cam1  conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                    d.confidence,
+                    d.box.x_min, d.box.y_min, d.box.x_max, d.box.y_max);
+
+    std::fflush(stdout);
+}
+
+
+int main(int argc, char* argv[])
+{
+    if (argc < 3) {
+        std::fprintf(stderr,
+            "Usage: %s <vosk_model_dir> <word1> [word2 ...]\n"
+            "  e.g. %s ../model_inf/vosk-model-small-en-us-0.15 cup person\n",
+            argv[0], argv[0]);
+        return 1;
+    }
+
+    std::signal(SIGINT,  on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    std::printf("[main] NorthStar integrated pipeline — initialising\n");
+
+    std::printf("[main] setting up GPIO\n");
+    gpio::setupGpio();
+
+    // ── Filter ───────────────────────────────────────────────────────────────
+    std::printf("[main] creating DetectionFilter\n");
+    DetectionFilter filter(on_filtered_pair);
+
+    // ── Mic pipeline config ──────────────────────────────────────────────────
+    std::printf("[main] configuring mic pipeline (vosk model: %s)\n", argv[1]);
+    Pipeline::Config mic_cfg;
+    mic_cfg.model_path = argv[1];
+
+    for (int i = 2; i < argc; ++i) {
+        const std::string word = argv[i];
+        const uint8_t     id   = coco_id_for_word(word);
+        if (id == 255) {
+            std::fprintf(stderr,
+                "[main] WARNING: \"%s\" is not a COCO class — will never match.\n",
+                word.c_str());
+        } else {
+            std::printf("[main]   registered: \"%s\" -> COCO id %d\n",
+                        word.c_str(), id);
+        }
+        mic_cfg.object_list.push_back(word);
+        mic_cfg.object_ids.push_back(id);
+    }
+
+    mic_cfg.on_detection = [](const DetectionResult& r) {
+        // Only print when armed, to avoid console spam between presses.
+        if (!mic_armed.load()) return;
+        std::printf("[mic] heard \"%-12s\"  id=%-3d  (%s)\n",
+                    r.word.c_str(), r.object_id,
+                    r.is_final ? "final" : "partial");
+        std::fflush(stdout);
+    };
+
+    mic_cfg.on_intent = [&filter](uint8_t id) {
+        if (!mic_armed.load()) {
+            std::printf("[mic] intent ignored (button not held): id=%d\n", id);
+            std::fflush(stdout);
+            return;
+        }
+        std::printf("[mic] arming filter -> COCO id %d\n", id);
+        std::fflush(stdout);
+        filter.on_intent(id);
+    };
+
+    // ── Hailo inference ──────────────────────────────────────────────────────
+    std::printf("[main] creating Hailo inference (hef: %s)\n", DEFAULT_HEF_PATH);
+    Hailo8Inference hailo(DEFAULT_HEF_PATH);
+
+    hailo.register_callback(
+        [&filter](uint8_t camera_id,
+                  uint64_t timestamp_ns,
+                  std::vector<std::vector<uint8_t>> raw_output)
+        {
+            const uint64_t n = ++g_hailo_callbacks;
+
+            InferencePacket pkt;
+            pkt.camera_id  = camera_id;
+            pkt.timestamp  = timestamp_ns;
+            pkt.detections = parse_detections(raw_output);
+
+            // Log every callback at a low rate to avoid flooding stdout.
+            if (n % 30 == 1) {
+                std::printf("[hailo] callback #%llu  cam=%d  detections=%zu  "
+                            "(armed=%s)\n",
+                            static_cast<unsigned long long>(n),
+                            camera_id,
+                            pkt.detections.size(),
+                            filter.is_armed() ? "yes" : "no");
+                std::fflush(stdout);
+            }
+
+            filter.on_inference_packet(std::move(pkt));
+        });
+
+    std::printf("[main] initialising Hailo...\n");
+    if (!hailo.initialize()) {
+        std::fprintf(stderr, "[main] FATAL: Hailo initialise failed\n");
+        gpio::teardownGpio();
+        return 1;
+    }
+    std::printf("[main] Hailo initialised: input=%zu bytes, output streams=%zu\n",
+                hailo.input_frame_size(), hailo.num_output_streams());
+
+    // ── Capture controller ──────────────────────────────────────────────────
+    std::printf("[main] creating CaptureController\n");
+    CaptureController controller;
+    g_controller_ptr = &controller;
+
+    // ── Camera consumer thread ───────────────────────────────────────────────
+    std::printf("[main] spawning cam consumer thread\n");
+    std::thread cam_thread([&]() {
+        std::printf("[cam] thread started\n");
+        auto& cam_q = controller.get_cam_queue();
+        while (auto pkt = cam_q.pop()) {
+            const uint64_t n = ++g_cam_frames_consumed;
+
+            hailo_prepare(pkt->data);
+            hailo.write_frame(pkt->data.data(),
+                              pkt->camera_id,
+                              pkt->timestamp_us * 1000ULL);
+
+            if (n % 60 == 1) {
+                std::printf("[cam] consumed frame #%llu  cam=%d  qsize=%zu\n",
+                            static_cast<unsigned long long>(n),
+                            pkt->camera_id,
+                            controller.cam_queue_size());
+                std::fflush(stdout);
+            }
+        }
+        std::printf("[cam] thread exiting (queue stopped) — %llu frames total\n",
+                    static_cast<unsigned long long>(g_cam_frames_consumed.load()));
+    });
+
+    // ── IR consumer thread ───────────────────────────────────────────────────
+    std::printf("[main] spawning IR consumer thread\n");
+    std::thread ir_thread([&]() {
+        std::printf("[ir] thread started\n");
+        auto& ir_q = controller.get_ir_queue();
+        while (auto pkt = ir_q.pop()) {
+            const uint64_t n = ++g_ir_frames_consumed;
+            (void)pkt;  // no consumer wired up yet
+
+            if (n % 10 == 1) {
+                std::printf("[ir] consumed frame #%llu  qsize=%zu\n",
+                            static_cast<unsigned long long>(n),
+                            controller.ir_queue_size());
+                std::fflush(stdout);
+            }
+        }
+        std::printf("[ir] thread exiting (queue stopped) — %llu frames total\n",
+                    static_cast<unsigned long long>(g_ir_frames_consumed.load()));
+    });
+
+    // ── Mic pipeline (always-on) ─────────────────────────────────────────────
+    std::printf("[main] starting mic pipeline\n");
+    Pipeline mic_pipeline(std::move(mic_cfg));
+    mic_pipeline.start();
+
+    
+    // ── Button ───────────────────────────────────────────────────────────────
+    std::printf("[main] registering button callbacks\n");
+    button_driver::ButtonDriver btn;
+
+    btn.registerPressCallback([&]() {
+        std::printf("\n[button] PRESS  — capture ON, mic active\n");
+        std::fflush(stdout);
+        mic_armed.store(true);
+        controller.start_capture();
+        std::printf("[cap] capture started\n");
+        std::fflush(stdout);
+    });
+
+    btn.registerReleaseCallback([&]() {
+        std::printf("\n[button] RELEASE  — capture OFF, mic ignored, filter reset\n");
+        std::fflush(stdout);
+        mic_armed.store(false);
+        controller.stop_capture();
+        filter.reset();
+        std::printf("[cap] capture stopped\n");
+        std::printf("[main] session totals: cam_frames=%llu  ir_frames=%llu  "
+                    "hailo_cb=%llu  pairs=%llu\n",
+                    static_cast<unsigned long long>(g_cam_frames_consumed.load()),
+                    static_cast<unsigned long long>(g_ir_frames_consumed.load()),
+                    static_cast<unsigned long long>(g_hailo_callbacks.load()),
+                    static_cast<unsigned long long>(g_pairs_emitted.load()));
+        std::fflush(stdout);
+    });
+    
+
+    /*
+    // ── Button ───────────────────────────────────────────────────────────────
+    std::printf("[main] registering button callbacks\n");
+    button_driver::ButtonDriver btn;
+
+    static constexpr uint8_t HARDCODED_OBJECT_ID = 67;  // cell phone
+
+    btn.registerPressCallback([&]() {
+        std::printf("\n[button] PRESS  — capture ON, filter armed for cell phone (id=%d)\n",
+                    HARDCODED_OBJECT_ID);
+        std::fflush(stdout);
+        mic_armed.store(true);
+        controller.start_capture();
+        filter.on_intent(HARDCODED_OBJECT_ID);
+        std::printf("[cap] capture started\n");
+        std::fflush(stdout);
+    });
+
+    btn.registerReleaseCallback([&]() {
+        std::printf("\n[button] RELEASE  — capture OFF, filter reset\n");
+        std::fflush(stdout);
+        mic_armed.store(false);
+        controller.stop_capture();
+        filter.reset();
+        std::printf("[cap] capture stopped\n");
+        std::printf("[main] session totals: cam_frames=%llu  ir_frames=%llu  "
+                    "hailo_cb=%llu  pairs=%llu\n",
+                    static_cast<unsigned long long>(g_cam_frames_consumed.load()),
+                    static_cast<unsigned long long>(g_ir_frames_consumed.load()),
+                    static_cast<unsigned long long>(g_hailo_callbacks.load()),
+                    static_cast<unsigned long long>(g_pairs_emitted.load()));
+        std::fflush(stdout);
+    });
+    */
+
+    std::printf("\n────────────────────────────────────────────────────\n");
+    std::printf(" NorthStar ready.\n");
+    std::printf("  - Hold button to capture frames.\n");
+    std::printf("  - Speak a registered object name while held to arm filter.\n");
+    std::printf("  - Ctrl-C to exit.\n");
+    std::printf("────────────────────────────────────────────────────\n\n");
+    std::fflush(stdout);
+
+    // ── Main idle loop ───────────────────────────────────────────────────────
+    while (g_running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // ── Shutdown ─────────────────────────────────────────────────────────────
+    std::printf("\n[main] shutdown initiated\n");
+
+    std::printf("[main] stopping capture\n");
+    controller.stop_capture();
+
+    std::printf("[main] stopping mic pipeline\n");
+    mic_pipeline.stop();
+
+    std::printf("[main] shutting down capture controller (will stop queues)\n");
+    controller.shutdown();
+
+    std::printf("[main] joining cam thread\n");
+    cam_thread.join();
+
+    std::printf("[main] joining ir thread\n");
+    ir_thread.join();
+
+    std::printf("[main] stopping Hailo\n");
+    hailo.stop();
+
+    std::printf("[main] tearing down GPIO\n");
+    gpio::teardownGpio();
+
+    std::printf("\n[main] FINAL: cam_frames=%llu  ir_frames=%llu  "
+                "hailo_cb=%llu  pairs=%llu  mic_drops=%zu\n",
+                static_cast<unsigned long long>(g_cam_frames_consumed.load()),
+                static_cast<unsigned long long>(g_ir_frames_consumed.load()),
+                static_cast<unsigned long long>(g_hailo_callbacks.load()),
+                static_cast<unsigned long long>(g_pairs_emitted.load()),
+                mic_pipeline.queue_drops());
+
+    std::printf("[main] goodbye\n");
+    return 0;
+}

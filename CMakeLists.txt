@@ -6,6 +6,141 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 find_package(OpenCV REQUIRED)
+add_compile_definitions(
+    NORTHSTAR_MODEL_DIR="${NORTHSTAR_MODEL_DIR}"
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+find_package(OpenCV    REQUIRED COMPONENTS core imgproc imgcodecs highgui)
+find_package(Threads   REQUIRED)
+
+# Camera
+pkg_check_modules(LIBCAMERA REQUIRED libcamera)
+
+# Hailo — libs at /usr/lib, headers at /usr/include on this Pi
+find_library(HAILO_LIB  hailort   HINTS /usr/lib               REQUIRED)
+find_path   (HAILO_INCLUDE hailo/hailort.hpp HINTS /usr/include REQUIRED)
+
+# Audio — ALSA, libsamplerate, Vosk
+pkg_check_modules(ALSA       REQUIRED alsa)
+pkg_check_modules(SAMPLERATE REQUIRED samplerate)
+
+find_library(VOSK_LIB   vosk       HINTS /usr/local/lib /usr/lib REQUIRED)
+find_path   (VOSK_INCLUDE vosk_api.h HINTS /usr/local/include /usr/include REQUIRED)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Include directories
+# ─────────────────────────────────────────────────────────────────────────────
+set(COMMON_INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${HAILO_INCLUDE}
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+set(AUDIO_INCLUDES
+    ${VOSK_INCLUDE}
+    ${ALSA_INCLUDE_DIRS}
+    ${SAMPLERATE_INCLUDE_DIRS}
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Source groups
+# ─────────────────────────────────────────────────────────────────────────────
+set(INFERENCE_SOURCES
+    src/inference/hailo8_inference.cpp
+    src/detection_utils.cpp
+)
+
+set(CAMERA_SOURCES
+    src/cam_downsampler.cpp
+    src/ir_capture.cpp
+    src/MLX90640.cpp
+    src/ThermalUtils.cpp
+)
+
+set(AUDIO_SOURCES
+    src/audio_capture.cpp
+    src/resampler.cpp
+    src/intent_detector.cpp
+    src/pipeline.cpp
+    src/detection_filter.cpp
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Helper macros
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hailo + OpenCV only
+macro(configure_target TARGET)
+    target_include_directories(${TARGET} PRIVATE ${COMMON_INCLUDES})
+    target_compile_options(${TARGET} PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(${TARGET} PRIVATE
+        ${HAILO_LIB}
+        ${OpenCV_LIBS}
+        Threads::Threads
+    )
+endmacro()
+
+# Hailo + OpenCV + libcamera
+macro(configure_camera_target TARGET)
+    configure_target(${TARGET})
+    target_include_directories(${TARGET} PRIVATE ${LIBCAMERA_INCLUDE_DIRS})
+    target_compile_options(${TARGET} PRIVATE ${LIBCAMERA_CFLAGS_OTHER})
+    target_link_libraries(${TARGET} PRIVATE ${LIBCAMERA_LIBRARIES})
+endmacro()
+
+# Hailo + ALSA + samplerate + Vosk (no libcamera)
+macro(configure_audio_target TARGET)
+    target_include_directories(${TARGET} PRIVATE
+        ${COMMON_INCLUDES}
+        ${AUDIO_INCLUDES}
+    )
+    target_compile_options(${TARGET} PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(${TARGET} PRIVATE
+        ${HAILO_LIB}
+        ${OpenCV_LIBS}
+        ${VOSK_LIB}
+        ${ALSA_LIBRARIES}
+        ${SAMPLERATE_LIBRARIES}
+        Threads::Threads
+    )
+endmacro()
+
+
+add_executable(test_save_pairs
+    src/test_save_pairs.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
+)
+configure_camera_target(test_save_pairs)
+target_include_directories(test_save_pairs PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(test_save_pairs PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+)
+
+add_executable(integrated_main
+    src/integrated_main.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
+    src/gpio.cpp
+    src/button-driver.cpp
+)
+configure_camera_target(integrated_main)
+target_include_directories(integrated_main PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(integrated_main PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+    gpiodcxx
+)
 
 add_executable(test_stereo_depth
     src/test_stereo_depth.cpp
@@ -13,3 +148,5 @@ add_executable(test_stereo_depth
 )
 target_include_directories(test_stereo_depth PRIVATE include)
 target_link_libraries(test_stereo_depth PRIVATE ${OpenCV_LIBS})
+configure_camera_target(capture_frames)
+ 

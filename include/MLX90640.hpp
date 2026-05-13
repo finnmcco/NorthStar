@@ -105,11 +105,10 @@ public:
     // Throws std::runtime_error on failure.
     explicit Driver(const std::string& i2cDevice,
                     uint8_t            address     = DEFAULT_I2C_ADDR,
-                    RefreshRate        rate        = RefreshRate::Hz2,
+                    RefreshRate        rate        = RefreshRate::Hz4,
                     ReadPattern        pattern     = ReadPattern::Chess);
 
     ~Driver();
-
     // Non-copyable
     Driver(const Driver&)            = delete;
     Driver& operator=(const Driver&) = delete;
