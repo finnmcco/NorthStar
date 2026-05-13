@@ -4,11 +4,9 @@
 #include "camera_queue.hpp"
 #include "ir_queue.hpp"
 #include "ir_capture.hpp"
+#include <thread>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
 
 class CaptureController {
 public:
@@ -23,71 +21,73 @@ public:
         camera_manager_->start();
     }
 
-    ~CaptureController()
-    {
-        // Ensure everything is stopped and wake the timer thread if still
-        // sleeping so it exits promptly.
-        stop_capture();
-
-        // Join the timer thread from outside — never join from inside the
-        // timer thread itself (that would be a thread joining itself).
-        if (timer_thread_.joinable())
-            timer_thread_.join();
-    }
-
-    void start_capture()
-    {
+    void start_capture(){
+        //stopped_ = false;
+        //camera_manager_->start();
+        bool expected = true;
+        if (!stopped_.compare_exchange_strong(expected, false)) return;
         cam0_.start();
         cam1_.start();
         ir_capture_.start();
-
+        
+        //wait for the cameras to wake up fully
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-
+        /*
         timer_thread_ = std::thread([this] {
-            std::unique_lock<std::mutex> lk(timer_mutex_);
-            timer_cv_.wait(lk); 
-            lk.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(5));
             stop_capture();
         });
+        */
     }
 
-    void stop_capture()
-    {
+    void stop_capture() {
         bool expected = false;
         if (!stopped_.compare_exchange_strong(expected, true)) return;
-
         cam0_.stop();
         cam1_.stop();
         ir_capture_.stop();
-        cam_queue_.stop();
-        ir_queue_.stop();
-
+        
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        camera_manager_->stop();
+        //camera_manager_->stop();
 
-        // Wake the timer thread if it is still sleeping so it exits promptly.
-        // Do NOT join here — stop_capture() can be called from the timer
-        // thread itself, and a thread cannot join itself.
-        timer_cv_.notify_all();
+        /*
+        if (timer_thread_.joinable()) {
+         timer_thread_.detach();
+        }
+        */
     }
 
-    CameraQueue& get_cam_queue() { return cam_queue_; }
-    IRQueue&     get_ir_queue()  { return ir_queue_;  }
+    void shutdown() {
+        cam_queue_.stop();
+        ir_queue_.stop();
+        camera_manager_->stop();
+    }
+    
+    CameraQueue& get_cam_queue() {
+        return cam_queue_;
+    }
 
-    std::size_t cam_queue_size() { return cam_queue_.size(); }
-    std::size_t ir_queue_size()  { return ir_queue_.size();  }
+    IRQueue& get_ir_queue() {
+        return ir_queue_;
+    }
+    
+    std::size_t cam_queue_size() {
+        return cam_queue_.size();
+    }
+
+    std::size_t ir_queue_size() {
+        return ir_queue_.size();
+    }
 
 private:
-    std::atomic<bool>       stopped_{false};
-    std::thread             timer_thread_;
-    std::mutex              timer_mutex_;
-    std::condition_variable timer_cv_;
-
+    std::atomic<bool> stopped_{true};
+    std::thread timer_thread_;
     std::unique_ptr<libcamera::CameraManager> camera_manager_;
     CameraQueue cam_queue_;
-    IRQueue     ir_queue_;
-    IRCapture   ir_capture_;
-    Camera      cam0_;
-    Camera      cam1_;
+    IRQueue ir_queue_;
+    IRCapture ir_capture_;
+
+    Camera cam0_;
+    Camera cam1_;
 };
