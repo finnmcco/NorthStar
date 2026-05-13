@@ -20,7 +20,7 @@ bool IRCapture::start()
 void IRCapture::stop()
 {
     running_ = false;
-    outQueue_.stop();          // unblocks any waiting consumer
+    //outQueue_.stop();          // unblocks any waiting consumer
     if (worker_.joinable())
         worker_.join();
 }
