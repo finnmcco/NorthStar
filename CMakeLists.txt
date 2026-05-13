@@ -4,12 +4,8 @@ project(northstar_perception)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Model configuration
-# ─────────────────────────────────────────────────────────────────────────────
-set(NORTHSTAR_MODEL_DIR "${CMAKE_SOURCE_DIR}/model_inf"
-    CACHE PATH "Directory containing .hef model files")
 
+find_package(OpenCV REQUIRED)
 add_compile_definitions(
     NORTHSTAR_MODEL_DIR="${NORTHSTAR_MODEL_DIR}"
 )
@@ -146,9 +142,11 @@ target_link_libraries(integrated_main PRIVATE
     gpiodcxx
 )
 
-add_executable(capture_frames
-    src/capture_frames.cpp
-    ${CAMERA_SOURCES}
+add_executable(test_stereo_depth
+    src/test_stereo_depth.cpp
+    src/stereo_distance.cpp
 )
+target_include_directories(test_stereo_depth PRIVATE include)
+target_link_libraries(test_stereo_depth PRIVATE ${OpenCV_LIBS})
 configure_camera_target(capture_frames)
  
