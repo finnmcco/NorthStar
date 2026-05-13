@@ -4,6 +4,7 @@
 #include <libcamera/libcamera.h>
 #include <sys/mman.h>
 #include "cam_downsampler.hpp"
+#include <atomic>
 
 class Camera {
 public:
@@ -58,6 +59,7 @@ public:
         
     }
 
+    /*
     void stop()
     {
         // Disconnect the callback so no further frames are delivered
@@ -79,6 +81,22 @@ public:
         camera_.reset();
         allocator_.reset();
     }
+        */
+    void stop() {
+        draining_.store(true);
+        {
+            // Wait for any in-flight callback to finish before tearing down
+            std::lock_guard<std::mutex> lock(callback_mutex_);
+        }
+
+        camera_->stop();
+        camera_->requestCompleted.disconnect(this, &Camera::on_request_completed);
+        allocator_->free(stream_);
+        camera_->release();
+        camera_.reset();
+        allocator_.reset();
+        draining_.store(false);  // reset for next start()
+    }
 
 private:
     CameraQueue& queue_;
@@ -89,13 +107,15 @@ private:
     std::unique_ptr<libcamera::FrameBufferAllocator> allocator_;
     libcamera::Stream* stream_;
     CamDownsampler downsampler_;
+    std::mutex callback_mutex_;
+    std::atomic<bool> draining_{false};
 
     void on_request_completed(libcamera::Request* request)
     {
-        // If the request was cancelled (e.g. during shutdown), do nothing
-        if (request->status() == libcamera::Request::RequestCancelled) {
-            return;
-        }
+        if (request->status() == libcamera::Request::RequestCancelled) return;
+
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (draining_.load()) return;  // bail before touching buffers or re-queueing
 
         // Get the buffer from the completed request
         // buffers() returns a map of stream -> FrameBuffer*
