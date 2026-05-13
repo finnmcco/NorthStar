@@ -132,6 +132,7 @@ add_executable(integrated_main
     ${AUDIO_SOURCES}
     src/gpio.cpp
     src/button-driver.cpp
+    src/stereo_distance.cpp
 )
 configure_camera_target(integrated_main)
 target_include_directories(integrated_main PRIVATE ${AUDIO_INCLUDES})
@@ -148,5 +149,5 @@ add_executable(test_stereo_depth
 )
 target_include_directories(test_stereo_depth PRIVATE include)
 target_link_libraries(test_stereo_depth PRIVATE ${OpenCV_LIBS})
-configure_camera_target(capture_frames)
+#configure_camera_target(capture_frames)
  
