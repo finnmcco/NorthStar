@@ -35,7 +35,7 @@ bool Hailo8Inference::initialize()
     const uint32_t queue_size = 2;
 
     auto in_params_exp  = network_group_->make_input_vstream_params(false, static_cast<hailo_format_type_t>(HAILO_FORMAT_TYPE_AUTO), timeout_ms, queue_size, "");
-    auto out_params_exp = network_group_->make_output_vstream_params(false, HAILO_FORMAT_TYPE_FLOAT32, timeout_ms, queue_size, "");
+    auto out_params_exp = network_group_->make_output_vstream_params(false, HAILO_FORMAT_TYPE_FLOAT32, HAILO_INFINITE, queue_size, "");
 
     if (!in_params_exp || !out_params_exp) { std::cerr << "[Hailo] Failed to create vstream params\n"; return false; }
 
