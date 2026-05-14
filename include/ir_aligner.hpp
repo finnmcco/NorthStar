@@ -1,3 +1,5 @@
+#pragma once
+
 #include <string> 
 #include "inference_packet.hpp"
 #include <opencv2/core.hpp>

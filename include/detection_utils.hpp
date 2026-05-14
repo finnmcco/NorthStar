@@ -15,4 +15,4 @@ std::vector<Detection> parse_yolov8_raw(const std::vector<std::vector<uint8_t>>&
 
 void draw_detections(cv::Mat& bgr_img, const std::vector<Detection>& dets);
 
-extern const char* const COCO_CLASSES[80];
+//extern const char* const COCO_CLASSES[80];

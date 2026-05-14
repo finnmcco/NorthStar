@@ -45,9 +45,14 @@
 #include <thread>
 #include "ir_frame_buffer.hpp"
 #include "ir_aligner.hpp"
+#include "temp_estimator.hpp"
+#include "direction_estimator.hpp"
+#include "output_struct.hpp"
 
 static IRFrameBuffer g_frame_buf_ir;
 static IRAligner* g_ir_aligner_ptr = nullptr;
+static TempEstimator* g_temp_estimator_ptr = nullptr;
+static DirectionEstimator* g_dir_estimator_ptr = nullptr;
 
 
 // ─── Globals for signal handling ─────────────────────────────────────────────
@@ -76,6 +81,8 @@ static void on_signal(int /*sig*/)
 static void on_filtered_pair(FilteredInferencePair pair)
 {
     const uint64_t n = ++g_pairs_emitted;
+    OutputReport output_report; 
+    output_report.object_id = pair.object_id;
 
     std::printf("\n[filter] PAIR #%llu  object_id=%-3d  ts=%-12llu  "
                 "cam0=%zu det  cam1=%zu det\n",
@@ -133,11 +140,13 @@ static void on_filtered_pair(FilteredInferencePair pair)
     if (depth_m) {
         std::printf("[depth] Z = %.2f m  (object_id=%d)\n",
                     *depth_m, pair.object_id);
+        output_report.distance = *depth_m;
     } else {
         std::printf("[depth] could not compute (textureless / out of range / "
                     "bbox outside rectified image)\n");
     }
     std::fflush(stdout);
+
 
     // now find the IR frame and align it
     auto ir = g_frame_buf_ir.find_closest(pair.timestamp_avg);
@@ -163,11 +172,56 @@ static void on_filtered_pair(FilteredInferencePair pair)
         return;
     }
 
+
     std::printf("[ir] projected bbox: [%d %d %d %d]\n",
                 ir_box.x0, ir_box.y0, ir_box.x1, ir_box.y1);
     std::fflush(stdout);
 
+    if (!g_temp_estimator_ptr) {
+        std::printf("[temp] estimator not initialised\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    //now estimate the temperature inside the IR projected bounding box
+    auto median_temp = g_temp_estimator_ptr->estimate_temp(ir_box, *ir);
+    if (median_temp) {
+        std::printf("[temp] median temperature in box: %.2f C\n", *median_temp);
+        output_report.temp = *median_temp;
+    } else {
+        std::printf("[temp] could not estimate median temperature\n");
+    }
+
+    // Direction estimation:
+    if (!g_dir_estimator_ptr) {
+        std::printf("[direction] estimator not initialised\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    Direction direct = g_dir_estimator_ptr->get_direction(best_cam0->box);
+    output_report.direction = g_dir_estimator_ptr->cvt_to_string(direct);
+
+    const char* object_name = coco_word_for_id(output_report.object_id);
+
+    if (!output_report.distance || !output_report.temp) {
+        std::printf("[output] incomplete report: distance=%s temp=%s\n",
+                    output_report.distance ? "yes" : "no",
+                    output_report.temp ? "yes" : "no");
+        std::fflush(stdout);
+        return;
+    }
+
+    std::printf(
+        "Your %s is in the %s of your vision, about %.2f metres away. It is %.2f degrees C.\n",
+        object_name,
+        output_report.direction.c_str(),
+        *output_report.distance,
+        *output_report.temp
+    );
+    std::fflush(stdout);
 }
+
 
 
 int main(int argc, char* argv[])
@@ -322,6 +376,14 @@ int main(int argc, char* argv[])
     // IR Aligner -------------------
     IRAligner ir_aligner("../cam_calibration/ir_alignment.yaml");
     g_ir_aligner_ptr = &ir_aligner;
+
+    //Temp estimator ----------
+    TempEstimator temp_estimator;
+    g_temp_estimator_ptr = &temp_estimator;
+
+    //Direction estimator -----
+    DirectionEstimator dir_estimator;
+    g_dir_estimator_ptr = &dir_estimator;
 
     // ── Camera consumer thread ───────────────────────────────────────────────
     std::printf("[main] spawning cam consumer thread\n");
