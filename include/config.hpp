@@ -4,7 +4,7 @@
 //  below to the filename you want.  After editing, just run
 
 
-#define NORTHSTAR_MODEL_FILENAME "yolov8n.hef"
+#define NORTHSTAR_MODEL_FILENAME "yolov8s.hef"
 
 #define DEFAULT_HEF_PATH NORTHSTAR_MODEL_DIR "/" NORTHSTAR_MODEL_FILENAME
 

@@ -111,19 +111,19 @@ macro(configure_audio_target TARGET)
 endmacro()
 
 
-add_executable(test_save_pairs
-    src/test_save_pairs.cpp
-    ${INFERENCE_SOURCES}
-    ${CAMERA_SOURCES}
-    ${AUDIO_SOURCES}
-)
-configure_camera_target(test_save_pairs)
-target_include_directories(test_save_pairs PRIVATE ${AUDIO_INCLUDES})
-target_link_libraries(test_save_pairs PRIVATE
-    ${VOSK_LIB}
-    ${ALSA_LIBRARIES}
-    ${SAMPLERATE_LIBRARIES}
-)
+#add_executable(test_save_pairs
+    #src/test_save_pairs.cpp
+    #${INFERENCE_SOURCES}
+    #${CAMERA_SOURCES}
+    #${AUDIO_SOURCES}
+#)
+#configure_camera_target(test_save_pairs)
+#target_include_directories(test_save_pairs PRIVATE ${AUDIO_INCLUDES})
+#target_link_libraries(test_save_pairs PRIVATE
+    #${VOSK_LIB}
+    #${ALSA_LIBRARIES}
+    #${SAMPLERATE_LIBRARIES}
+#)
 
 add_executable(integrated_main
     src/integrated_main.cpp
@@ -133,6 +133,7 @@ add_executable(integrated_main
     src/gpio.cpp
     src/button-driver.cpp
     src/stereo_distance.cpp
+    src/ir_aligner.cpp
 )
 configure_camera_target(integrated_main)
 target_include_directories(integrated_main PRIVATE ${AUDIO_INCLUDES})
@@ -151,3 +152,11 @@ target_include_directories(test_stereo_depth PRIVATE include)
 target_link_libraries(test_stereo_depth PRIVATE ${OpenCV_LIBS})
 #configure_camera_target(capture_frames)
  
+add_executable(ir_calib_capture
+    src/ir_calib_capture.cpp
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(ir_calib_capture)
+target_link_libraries(ir_calib_capture PRIVATE
+    ${OpenCV_LIBS}
+)

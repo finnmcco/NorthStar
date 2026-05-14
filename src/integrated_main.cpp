@@ -43,6 +43,11 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include "ir_frame_buffer.hpp"
+#include "ir_aligner.hpp"
+
+static IRFrameBuffer g_frame_buf_ir;
+static IRAligner* g_ir_aligner_ptr = nullptr;
 
 
 // ─── Globals for signal handling ─────────────────────────────────────────────
@@ -133,6 +138,35 @@ static void on_filtered_pair(FilteredInferencePair pair)
                     "bbox outside rectified image)\n");
     }
     std::fflush(stdout);
+
+    // now find the IR frame and align it
+    auto ir = g_frame_buf_ir.find_closest(pair.timestamp_avg);
+
+    if (!ir) {
+        std::printf("[ir] no IR frame in buffer for pair ts=%llu\n",
+                    static_cast<unsigned long long>(pair.timestamp_avg));
+        std::fflush(stdout);
+        return;
+    }
+    if (!g_ir_aligner_ptr) {
+        std::printf("[ir] aligner not initialised\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    IRAligner::PixelRect ir_box =
+        g_ir_aligner_ptr->project_bbox(best_cam0->box);
+
+    if (!ir_box.valid) {
+        std::printf("[ir] projected bbox invalid / outside IR image\n");
+        std::fflush(stdout);
+        return;
+    }
+
+    std::printf("[ir] projected bbox: [%d %d %d %d]\n",
+                ir_box.x0, ir_box.y0, ir_box.x1, ir_box.y1);
+    std::fflush(stdout);
+
 }
 
 
@@ -285,6 +319,10 @@ int main(int argc, char* argv[])
     g_depth_ptr = &depth;
     std::printf("[main] stereo calibration loaded: baseline=%.3f m\n", depth.baseline_m());
 
+    // IR Aligner -------------------
+    IRAligner ir_aligner("../cam_calibration/ir_alignment.yaml");
+    g_ir_aligner_ptr = &ir_aligner;
+
     // ── Camera consumer thread ───────────────────────────────────────────────
     std::printf("[main] spawning cam consumer thread\n");
     std::thread cam_thread([&]() {
@@ -322,17 +360,23 @@ int main(int argc, char* argv[])
     std::thread ir_thread([&]() {
         std::printf("[ir] thread started\n");
         auto& ir_q = controller.get_ir_queue();
+
         while (auto pkt = ir_q.pop()) {
             const uint64_t n = ++g_ir_frames_consumed;
-            (void)pkt;  // no consumer wired up yet
+
+            const uint64_t ts_ns = pkt->timestamp_us * 1000ULL;
+            g_frame_buf_ir.push(ts_ns, pkt->temps, pkt->ambientTemp);
 
             if (n % 10 == 1) {
-                std::printf("[ir] consumed frame #%llu  qsize=%zu\n",
+                std::printf("[ir] consumed frame #%llu  qsize=%zu  irbuf=%zu  ambient=%.2f C\n",
                             static_cast<unsigned long long>(n),
-                            controller.ir_queue_size());
+                            controller.ir_queue_size(),
+                            g_frame_buf_ir.size(),
+                            pkt->ambientTemp);
                 std::fflush(stdout);
             }
         }
+
         std::printf("[ir] thread exiting (queue stopped) — %llu frames total\n",
                     static_cast<unsigned long long>(g_ir_frames_consumed.load()));
     });

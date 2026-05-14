@@ -1,0 +1,15 @@
+%YAML:1.0
+---
+ir_width: 32
+ir_height: 24
+# Affine transform: [ir_x, ir_y]^T = M * [cam_x_norm, cam_y_norm, 1]^T
+# where cam_x_norm = cam_x_pixel / 640 (and cam_y_norm likewise)
+M: !!opencv-matrix
+   rows: 2
+   cols: 3
+   dt: d
+   data: [ 8.84753146, 21.37334403, 0.15779681,
+          20.60147378, -9.11951936, 3.91908274 ]
+num_correspondences: 10
+rms_residual_px: 0.52
+max_residual_px: 0.88
