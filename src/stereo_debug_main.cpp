@@ -1,23 +1,20 @@
 /*
-    stereo_debug_main.cpp  —  one-shot stereo depth diagnostic
+    stereo_debug_main.cpp  --  one-shot stereo depth diagnostic (button-only)
 
-    Same upstream pipeline as integrated_main (button, capture, inference,
-    mic intent, filter), but on the first FilteredInferencePair it:
+    Hold the button to arm the filter for the COCO object passed as argument.
+    Release to stop capture and reset the filter.
 
+    On each FilteredInferencePair the program:
       1. Computes stereo depth.
       2. Saves three diagnostic PNGs into stereo_debug/<session>/:
-           pair_0001_unrectified.png   — cam0 | cam1 raw, with raw bbox drawn
-           pair_0001_rectified.png     — cam0 | cam1 rectified, with rectified
-                                          bbox drawn on each
-           pair_0001_disparity.png     — colourised disparity, with rectified
-                                          cam0 bbox drawn
-      3. Prints the depth value and exits.
+           pair_0001_unrectified.png
+           pair_0001_rectified.png
+           pair_0001_disparity.png
+      3. Exits after SAVE_PAIRS pairs.
 
     Run as:
-      ./stereo_debug_main <vosk_model_dir> <word1> [word2 ...]
-
-    Output directory is created relative to CWD. If you want multiple captures
-    per run, change SAVE_PAIRS below.
+      ./stereo_debug_main <word>
+      e.g. ./stereo_debug_main cup
 */
 
 #include "capture_controller.hpp"
@@ -28,7 +25,6 @@
 #include "detection_filter.hpp"
 #include "detection_utils.hpp"
 #include "inference_packet.hpp"
-#include "pipeline.hpp"
 #include "button-driver.h"
 #include "gpio.h"
 #include "inference/hailo8_inference.hpp"
@@ -50,75 +46,59 @@
 #include <string>
 #include <thread>
 
+static constexpr int SAVE_PAIRS = 20;
 
-// How many pairs to save before exiting. Set to a larger number if you want
-// several captures per run; the program will stop the moment it has saved this
-// many pair-bundles.
-static constexpr int SAVE_PAIRS = 5;
-
-// ─── Globals for signal handling ─────────────────────────────────────────────
-std::atomic<bool>  g_running{true};
+// -- Globals ------------------------------------------------------------------
+std::atomic<bool>     g_running{true};
 static CaptureController* g_controller_ptr = nullptr;
-std::atomic<bool> mic_armed{false};
 
-// ─── Counters ────────────────────────────────────────────────────────────────
 static std::atomic<uint64_t> g_cam_frames_consumed{0};
 static std::atomic<uint64_t> g_ir_frames_consumed{0};
 static std::atomic<uint64_t> g_hailo_callbacks{0};
 static std::atomic<uint64_t> g_pairs_emitted{0};
 static std::atomic<int>      g_pairs_saved{0};
 
-// ─── Frame buffers + depth estimator ─────────────────────────────────────────
 static FrameBuffer g_frame_buf_cam0;
 static FrameBuffer g_frame_buf_cam1;
 static StereoDepthEstimator* g_depth_ptr = nullptr;
 
-// ─── Output directory ────────────────────────────────────────────────────────
 static std::string g_output_dir;
+static std::mutex  g_save_mutex;
 
-// Guards the save path: only one pair at a time goes through the saving code,
-// because save_diagnostic_pngs() is non-trivial and we don't want overlapping
-// PNG writes for the same pair index.
-static std::mutex g_save_mutex;
+// The single target object ID resolved from the command-line word.
+static uint8_t g_target_id = 0;
 
-static void on_signal(int /*sig*/)
+static void on_signal(int)
 {
     g_running = false;
     if (g_controller_ptr) g_controller_ptr->stop_capture();
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// -- Helpers ------------------------------------------------------------------
 
-// Build a timestamped session directory inside ./stereo_debug/ and return it.
-// Creates the directory tree. Returns empty string on failure.
 static std::string make_session_dir()
 {
     using namespace std::chrono;
-    const auto now    = system_clock::to_time_t(system_clock::now());
+    const auto now = system_clock::to_time_t(system_clock::now());
     std::tm tm{};
     localtime_r(&now, &tm);
 
     std::ostringstream oss;
-    oss << "stereo_debug/"
-        << std::put_time(&tm, "%Y%m%d_%H%M%S");
-
+    oss << "stereo_debug/" << std::put_time(&tm, "%Y%m%d_%H%M%S");
     const std::string dir = oss.str();
 
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     if (ec) {
-        std::fprintf(stderr, "[main] FATAL: could not create %s — %s\n",
+        std::fprintf(stderr, "[main] FATAL: could not create %s -- %s\n",
                      dir.c_str(), ec.message().c_str());
         return {};
     }
     return dir;
 }
 
-// Draw a normalised bbox onto a 640x640 BGR image and label it.
-static void draw_norm_bbox(cv::Mat& img,
-                           const BoundingBox& box,
-                           const cv::Scalar& colour,
-                           const std::string& label)
+static void draw_norm_bbox(cv::Mat& img, const BoundingBox& box,
+                           const cv::Scalar& colour, const std::string& label)
 {
     const int W = img.cols, H = img.rows;
     const int x0 = std::clamp(static_cast<int>(box.x_min * W), 0, W - 1);
@@ -126,30 +106,24 @@ static void draw_norm_bbox(cv::Mat& img,
     const int x1 = std::clamp(static_cast<int>(box.x_max * W), 0, W - 1);
     const int y1 = std::clamp(static_cast<int>(box.y_max * H), 0, H - 1);
     cv::rectangle(img, {x0, y0}, {x1, y1}, colour, 2);
-    if (!label.empty()) {
+    if (!label.empty())
         cv::putText(img, label, {x0 + 4, y0 + 18},
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv::LINE_AA);
-    }
 }
 
-// Draw a pixel-space bbox onto an image.
-static void draw_pixel_bbox(cv::Mat& img,
-                            int x0, int y0, int x1, int y1,
-                            const cv::Scalar& colour,
-                            const std::string& label)
+static void draw_pixel_bbox(cv::Mat& img, int x0, int y0, int x1, int y1,
+                            const cv::Scalar& colour, const std::string& label)
 {
     x0 = std::clamp(x0, 0, img.cols - 1);
     y0 = std::clamp(y0, 0, img.rows - 1);
     x1 = std::clamp(x1, 0, img.cols - 1);
     y1 = std::clamp(y1, 0, img.rows - 1);
     cv::rectangle(img, {x0, y0}, {x1, y1}, colour, 2);
-    if (!label.empty()) {
+    if (!label.empty())
         cv::putText(img, label, {x0 + 4, y0 + 18},
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv::LINE_AA);
-    }
 }
 
-// Concatenate two same-sized BGR images side-by-side and return the result.
 static cv::Mat side_by_side(const cv::Mat& left, const cv::Mat& right)
 {
     cv::Mat out;
@@ -157,9 +131,6 @@ static cv::Mat side_by_side(const cv::Mat& left, const cv::Mat& right)
     return out;
 }
 
-// Project a normalised bbox through rectification using the same K/D/R/P
-// passed in. Returns the inclusive integer pixel rect, clamped to the image,
-// or an empty cv::Rect if the projected box is entirely outside.
 static cv::Rect rectify_bbox(const BoundingBox& box,
                              const cv::Mat& K, const cv::Mat& D,
                              const cv::Mat& R, const cv::Mat& P,
@@ -168,7 +139,6 @@ static cv::Rect rectify_bbox(const BoundingBox& box,
     const float W = static_cast<float>(image_size.width);
     const float H = static_cast<float>(image_size.height);
 
-    // Use all four corners, not just two, because rectification is non-linear.
     std::vector<cv::Point2f> corners_raw = {
         { box.x_min * W, box.y_min * H },
         { box.x_max * W, box.y_min * H },
@@ -190,27 +160,21 @@ static cv::Rect rectify_bbox(const BoundingBox& box,
     }
 
     if (max_x < 0 || max_y < 0 ||
-        min_x > image_size.width - 1 ||
-        min_y > image_size.height - 1) {
+        min_x > image_size.width  - 1 ||
+        min_y > image_size.height - 1)
         return {};
-    }
 
-    int x0 = std::max(0, static_cast<int>(std::floor(min_x)));
-    int y0 = std::max(0, static_cast<int>(std::floor(min_y)));
-    int x1 = std::min(image_size.width  - 1,
-                      static_cast<int>(std::ceil(max_x)));
-    int y1 = std::min(image_size.height - 1,
-                      static_cast<int>(std::ceil(max_y)));
-    if (x1 <= x0 || y1 <= y0) return {};
-    return cv::Rect(cv::Point(x0, y0), cv::Point(x1 + 1, y1 + 1));
+    int rx0 = std::max(0, static_cast<int>(std::floor(min_x)));
+    int ry0 = std::max(0, static_cast<int>(std::floor(min_y)));
+    int rx1 = std::min(image_size.width  - 1, static_cast<int>(std::ceil(max_x)));
+    int ry1 = std::min(image_size.height - 1, static_cast<int>(std::ceil(max_y)));
+    if (rx1 <= rx0 || ry1 <= ry0) return {};
+    return cv::Rect(cv::Point(rx0, ry0), cv::Point(rx1 + 1, ry1 + 1));
 }
 
-// Convert a float32 disparity map (in pixels) into a BGR colourised image
-// suitable for saving. Invalid (negative) disparities map to black.
 static cv::Mat colourise_disparity(const cv::Mat& disparity_px)
 {
     cv::Mat valid_mask = disparity_px > 0;
-
     double dmin = 0, dmax = 0;
     cv::minMaxLoc(disparity_px, &dmin, &dmax, nullptr, nullptr, valid_mask);
     if (dmax <= dmin) dmax = dmin + 1.0;
@@ -219,110 +183,80 @@ static cv::Mat colourise_disparity(const cv::Mat& disparity_px)
     disparity_px.convertTo(normed, CV_8U,
                            255.0 / (dmax - dmin),
                            -255.0 * dmin / (dmax - dmin));
-
     cv::Mat coloured;
     cv::applyColorMap(normed, coloured, cv::COLORMAP_JET);
-
-    // Mask out invalid pixels to black so they're visually obvious.
     coloured.setTo(cv::Scalar(0, 0, 0), ~valid_mask);
-
     return coloured;
 }
 
-
-// ─── The interesting bit: save all three diagnostic PNGs for one pair ────────
+// -- Diagnostic PNG save ------------------------------------------------------
 static void save_diagnostic_pngs(int pair_idx,
                                  const cv::Mat& left_raw,
                                  const cv::Mat& right_raw,
                                  const Detection& best_cam0,
-                                 const Detection* best_cam1,   // may be null
+                                 const Detection* best_cam1,
                                  std::optional<float> depth_m)
 {
     char prefix[64];
     std::snprintf(prefix, sizeof(prefix), "%s/pair_%04d",
                   g_output_dir.c_str(), pair_idx);
 
-    // ── 1. Unrectified side-by-side with raw bboxes ─────────────────────────
+    // 1. Unrectified side-by-side
     {
         cv::Mat l = left_raw.clone();
         cv::Mat r = right_raw.clone();
-
-        draw_norm_bbox(l, best_cam0.box,
-                       cv::Scalar(0, 255, 0),
-                       "cam0 raw");
-        if (best_cam1) {
-            draw_norm_bbox(r, best_cam1->box,
-                           cv::Scalar(0, 255, 0),
-                           "cam1 raw");
-        } else {
+        draw_norm_bbox(l, best_cam0.box, cv::Scalar(0, 255, 0), "cam0 raw");
+        if (best_cam1)
+            draw_norm_bbox(r, best_cam1->box, cv::Scalar(0, 255, 0), "cam1 raw");
+        else
             cv::putText(r, "(no cam1 detection)", {8, 24},
                         cv::FONT_HERSHEY_SIMPLEX, 0.6,
                         cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
-        }
 
         const std::string path = std::string(prefix) + "_unrectified.png";
-        if (cv::imwrite(path, side_by_side(l, r)))
-            std::printf("[debug] saved %s\n", path.c_str());
-        else
-            std::printf("[debug] FAILED to save %s\n", path.c_str());
+        cv::imwrite(path, side_by_side(l, r))
+            ? std::printf("[debug] saved %s\n", path.c_str())
+            : std::printf("[debug] FAILED to save %s\n", path.c_str());
     }
 
-    // ── 2. Rectified side-by-side with rectified bboxes ─────────────────────
-    //
-    //  Trigger compute() to populate last_left_rect / last_right_rect /
-    //  last_disparity. We use the cam0 bbox (the one used for depth) so the
-    //  estimator's state matches what we annotate.
+    // 2. Rectified side-by-side
     {
         const cv::Mat& lrect = g_depth_ptr->last_left_rect();
         const cv::Mat& rrect = g_depth_ptr->last_right_rect();
         if (lrect.empty() || rrect.empty()) {
-            std::printf("[debug] WARNING: rectified frames not available "
-                        "(did compute() fail?)\n");
+            std::printf("[debug] WARNING: rectified frames not available\n");
         } else {
             cv::Mat l = lrect.clone();
             cv::Mat r = rrect.clone();
 
-            cv::Rect rect_box_left = rectify_bbox(
-                best_cam0.box,
+            cv::Rect rb_l = rectify_bbox(best_cam0.box,
                 g_depth_ptr->K1(), g_depth_ptr->D1(),
-                g_depth_ptr->R1(), g_depth_ptr->P1(),
-                l.size());
-            if (rect_box_left.area() > 0) {
-                draw_pixel_bbox(l,
-                                rect_box_left.x,
-                                rect_box_left.y,
-                                rect_box_left.x + rect_box_left.width  - 1,
-                                rect_box_left.y + rect_box_left.height - 1,
-                                cv::Scalar(0, 255, 0),
-                                "cam0 rect");
-            }
+                g_depth_ptr->R1(), g_depth_ptr->P1(), l.size());
+            if (rb_l.area() > 0)
+                draw_pixel_bbox(l, rb_l.x, rb_l.y,
+                                rb_l.x + rb_l.width - 1,
+                                rb_l.y + rb_l.height - 1,
+                                cv::Scalar(0, 255, 0), "cam0 rect");
 
             if (best_cam1) {
-                cv::Rect rect_box_right = rectify_bbox(
-                    best_cam1->box,
+                cv::Rect rb_r = rectify_bbox(best_cam1->box,
                     g_depth_ptr->K2(), g_depth_ptr->D2(),
-                    g_depth_ptr->R2(), g_depth_ptr->P2(),
-                    r.size());
-                if (rect_box_right.area() > 0) {
-                    draw_pixel_bbox(r,
-                                    rect_box_right.x,
-                                    rect_box_right.y,
-                                    rect_box_right.x + rect_box_right.width  - 1,
-                                    rect_box_right.y + rect_box_right.height - 1,
-                                    cv::Scalar(0, 255, 0),
-                                    "cam1 rect");
-                }
+                    g_depth_ptr->R2(), g_depth_ptr->P2(), r.size());
+                if (rb_r.area() > 0)
+                    draw_pixel_bbox(r, rb_r.x, rb_r.y,
+                                    rb_r.x + rb_r.width - 1,
+                                    rb_r.y + rb_r.height - 1,
+                                    cv::Scalar(0, 255, 0), "cam1 rect");
             }
 
             const std::string path = std::string(prefix) + "_rectified.png";
-            if (cv::imwrite(path, side_by_side(l, r)))
-                std::printf("[debug] saved %s\n", path.c_str());
-            else
-                std::printf("[debug] FAILED to save %s\n", path.c_str());
+            cv::imwrite(path, side_by_side(l, r))
+                ? std::printf("[debug] saved %s\n", path.c_str())
+                : std::printf("[debug] FAILED to save %s\n", path.c_str());
         }
     }
 
-    // ── 3. Disparity map with rectified cam0 bbox overlay ──────────────────
+    // 3. Disparity map
     {
         const cv::Mat& disp = g_depth_ptr->last_disparity();
         if (disp.empty()) {
@@ -330,11 +264,9 @@ static void save_diagnostic_pngs(int pair_idx,
         } else {
             cv::Mat coloured = colourise_disparity(disp);
 
-            cv::Rect rect_box_left = rectify_bbox(
-                best_cam0.box,
+            cv::Rect rb_l = rectify_bbox(best_cam0.box,
                 g_depth_ptr->K1(), g_depth_ptr->D1(),
-                g_depth_ptr->R1(), g_depth_ptr->P1(),
-                coloured.size());
+                g_depth_ptr->R1(), g_depth_ptr->P1(), coloured.size());
 
             std::string label = "depth: ";
             if (depth_m) {
@@ -345,31 +277,25 @@ static void save_diagnostic_pngs(int pair_idx,
                 label += "n/a";
             }
 
-            if (rect_box_left.area() > 0) {
-                draw_pixel_bbox(coloured,
-                                rect_box_left.x,
-                                rect_box_left.y,
-                                rect_box_left.x + rect_box_left.width  - 1,
-                                rect_box_left.y + rect_box_left.height - 1,
-                                cv::Scalar(255, 255, 255),
-                                label);
-            } else {
+            if (rb_l.area() > 0)
+                draw_pixel_bbox(coloured, rb_l.x, rb_l.y,
+                                rb_l.x + rb_l.width - 1,
+                                rb_l.y + rb_l.height - 1,
+                                cv::Scalar(255, 255, 255), label);
+            else
                 cv::putText(coloured, label, {8, 24},
                             cv::FONT_HERSHEY_SIMPLEX, 0.6,
                             cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
-            }
 
             const std::string path = std::string(prefix) + "_disparity.png";
-            if (cv::imwrite(path, coloured))
-                std::printf("[debug] saved %s\n", path.c_str());
-            else
-                std::printf("[debug] FAILED to save %s\n", path.c_str());
+            cv::imwrite(path, coloured)
+                ? std::printf("[debug] saved %s\n", path.c_str())
+                : std::printf("[debug] FAILED to save %s\n", path.c_str());
         }
     }
 }
 
-
-// ─── Filter callback ─────────────────────────────────────────────────────────
+// -- Filter callback ----------------------------------------------------------
 static void on_filtered_pair(FilteredInferencePair pair)
 {
     const uint64_t n = ++g_pairs_emitted;
@@ -388,7 +314,6 @@ static void on_filtered_pair(FilteredInferencePair pair)
         return;
     }
 
-    // Highest-confidence cam0 and cam1 detections.
     const Detection* best_cam0 = &pair.cam0_detections.front();
     for (const auto& d : pair.cam0_detections)
         if (d.confidence > best_cam0->confidence) best_cam0 = &d;
@@ -409,10 +334,8 @@ static void on_filtered_pair(FilteredInferencePair pair)
     cv::Mat left  = g_frame_buf_cam0.find_closest(pair.timestamp_avg);
     cv::Mat right = g_frame_buf_cam1.find_closest(pair.timestamp_avg);
     if (left.empty() || right.empty()) {
-        std::printf("[depth] no frame in buffer for pair ts=%llu  "
-                    "(cam0_empty=%d cam1_empty=%d)\n",
-                    static_cast<unsigned long long>(pair.timestamp_avg),
-                    left.empty(), right.empty());
+        std::printf("[depth] no frame in buffer for pair ts=%llu\n",
+                    static_cast<unsigned long long>(pair.timestamp_avg));
         std::fflush(stdout);
         return;
     }
@@ -422,24 +345,18 @@ static void on_filtered_pair(FilteredInferencePair pair)
         return;
     }
 
-    // Serialise the save path. Two pairs landing back-to-back from the read
-    // thread would otherwise share last_disparity_ etc.
     std::lock_guard<std::mutex> save_lock(g_save_mutex);
-
-    if (g_pairs_saved.load() >= SAVE_PAIRS) {
-        // Already done — ignore later pairs while we tear down.
-        return;
-    }
+    if (g_pairs_saved.load() >= SAVE_PAIRS) return;
 
     auto depth_m = g_depth_ptr->compute(left, right, best_cam0->box);
 
-    if (depth_m) {
+    if (depth_m)
         std::printf("[depth] Z = %.2f m  (object_id=%d)\n",
                     *depth_m, pair.object_id);
-    } else {
+    else
         std::printf("[depth] could not compute (textureless / out of range / "
                     "bbox outside rectified image)\n");
-    }
+
     std::fflush(stdout);
 
     const int saved_idx = g_pairs_saved.fetch_add(1) + 1;
@@ -454,15 +371,13 @@ static void on_filtered_pair(FilteredInferencePair pair)
     }
 }
 
-
-// ─── main ────────────────────────────────────────────────────────────────────
-
+// -- main ---------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
-    if (argc < 3) {
+    if (argc != 2) {
         std::fprintf(stderr,
-            "Usage: %s <vosk_model_dir> <word1> [word2 ...]\n"
-            "  e.g. %s ../model_inf/vosk-model-small-en-us-0.15 cup person\n",
+            "Usage: %s <word>\n"
+            "  e.g. %s cup\n",
             argv[0], argv[0]);
         return 1;
     }
@@ -470,59 +385,27 @@ int main(int argc, char* argv[])
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
-    std::printf("[main] stereo_debug — initialising\n");
+    // Resolve word to COCO id
+    const std::string target_word = argv[1];
+    g_target_id = coco_id_for_word(target_word);
+    if (g_target_id == 255) {
+        std::fprintf(stderr, "[main] ERROR: \"%s\" is not a COCO class name\n",
+                     target_word.c_str());
+        return 1;
+    }
+    std::printf("[main] target: \"%s\" -> COCO id %d\n",
+                target_word.c_str(), g_target_id);
 
     g_output_dir = make_session_dir();
     if (g_output_dir.empty()) return 1;
     std::printf("[main] output dir: %s\n", g_output_dir.c_str());
 
-    std::printf("[main] setting up GPIO\n");
     gpio::setupGpio();
 
-    // ── Filter ───────────────────────────────────────────────────────────────
-    std::printf("[main] creating DetectionFilter\n");
+    // -- DetectionFilter
     DetectionFilter filter(on_filtered_pair);
 
-    // ── Mic pipeline config ──────────────────────────────────────────────────
-    std::printf("[main] configuring mic pipeline (vosk model: %s)\n", argv[1]);
-    Pipeline::Config mic_cfg;
-    mic_cfg.model_path = argv[1];
-
-    for (int i = 2; i < argc; ++i) {
-        const std::string word = argv[i];
-        const uint8_t     id   = coco_id_for_word(word);
-        if (id == 255) {
-            std::fprintf(stderr,
-                "[main] WARNING: \"%s\" is not a COCO class — will never match.\n",
-                word.c_str());
-        } else {
-            std::printf("[main]   registered: \"%s\" -> COCO id %d\n",
-                        word.c_str(), id);
-        }
-        mic_cfg.object_list.push_back(word);
-        mic_cfg.object_ids.push_back(id);
-    }
-
-    mic_cfg.on_detection = [](const DetectionResult& r) {
-        if (!mic_armed.load()) return;
-        std::printf("[mic] heard \"%-12s\"  id=%-3d  (%s)\n",
-                    r.word.c_str(), r.object_id,
-                    r.is_final ? "final" : "partial");
-        std::fflush(stdout);
-    };
-
-    mic_cfg.on_intent = [&filter](uint8_t id) {
-        if (!mic_armed.load()) {
-            std::printf("[mic] intent ignored (button not held): id=%d\n", id);
-            std::fflush(stdout);
-            return;
-        }
-        std::printf("[mic] arming filter -> COCO id %d\n", id);
-        std::fflush(stdout);
-        filter.on_intent(id);
-    };
-
-    // ── Hailo inference ──────────────────────────────────────────────────────
+    // -- Hailo
     std::printf("[main] creating Hailo inference (hef: %s)\n", DEFAULT_HEF_PATH);
     Hailo8Inference hailo(DEFAULT_HEF_PATH);
 
@@ -539,152 +422,113 @@ int main(int argc, char* argv[])
             pkt.detections = parse_detections(raw_output);
 
             if (filter.is_armed()) {
-                const uint8_t target = filter.target_object_id();
-                int matches = 0;
                 for (const auto& d : pkt.detections) {
-                    if (d.object_id == target) {
-                        ++matches;
-                        std::printf("[hailo] HIT cb#%llu  cam=%d  target=%d  "
-                                    "conf=%.2f  box=[%.2f %.2f %.2f %.2f]\n",
+                    if (d.object_id == g_target_id) {
+                        std::printf("[hailo] HIT cb#%llu  cam=%d  conf=%.2f  "
+                                    "box=[%.2f %.2f %.2f %.2f]\n",
                                     static_cast<unsigned long long>(n),
-                                    camera_id, target, d.confidence,
+                                    camera_id, d.confidence,
                                     d.box.x_min, d.box.y_min,
                                     d.box.x_max, d.box.y_max);
+                        std::fflush(stdout);
                     }
                 }
-                if (matches > 0) std::fflush(stdout);
             }
 
             filter.on_inference_packet(std::move(pkt));
         });
 
-    std::printf("[main] initialising Hailo...\n");
     if (!hailo.initialize()) {
         std::fprintf(stderr, "[main] FATAL: Hailo initialise failed\n");
         gpio::teardownGpio();
         return 1;
     }
-    std::printf("[main] Hailo initialised: input=%zu bytes, output streams=%zu\n",
-                hailo.input_frame_size(), hailo.num_output_streams());
+    std::printf("[main] Hailo initialised\n");
 
-    // ── Capture controller ──────────────────────────────────────────────────
-    std::printf("[main] creating CaptureController\n");
+    // -- Capture controller + stereo calibration
     CaptureController controller;
     g_controller_ptr = &controller;
 
-    std::printf("[main] loading stereo calibration\n");
     StereoDepthEstimator depth("../cam_calibration/stereo_calib_640.yaml");
     g_depth_ptr = &depth;
     std::printf("[main] stereo calibration loaded: baseline=%.3f m\n",
                 depth.baseline_m());
 
-    // ── Camera consumer thread ───────────────────────────────────────────────
-    std::printf("[main] spawning cam consumer thread\n");
+    // -- Camera consumer thread
     std::thread cam_thread([&]() {
-        std::printf("[cam] thread started\n");
         auto& cam_q = controller.get_cam_queue();
         while (auto pkt = cam_q.pop()) {
-            const uint64_t n = ++g_cam_frames_consumed;
             const uint64_t ts_ns = pkt->timestamp_us * 1000ULL;
-
             cv::Mat frame(640, 640, CV_8UC3, pkt->data.data());
             if (pkt->camera_id == 0) g_frame_buf_cam0.push(ts_ns, frame.clone());
             else                     g_frame_buf_cam1.push(ts_ns, frame.clone());
 
             hailo_prepare(pkt->data);
-            hailo.write_frame(pkt->data.data(),
-                              pkt->camera_id,
-                              ts_ns);
+            hailo.write_frame(pkt->data.data(), pkt->camera_id, ts_ns);
 
+            const uint64_t n = ++g_cam_frames_consumed;
             if (n % 60 == 1) {
-                std::printf("[cam] consumed frame #%llu  cam=%d  qsize=%zu\n",
+                std::printf("[cam] frame #%llu  cam=%d\n",
                             static_cast<unsigned long long>(n),
-                            pkt->camera_id,
-                            controller.cam_queue_size());
+                            pkt->camera_id);
                 std::fflush(stdout);
             }
         }
-        std::printf("[cam] thread exiting (queue stopped) — %llu frames total\n",
+        std::printf("[cam] thread exiting -- %llu frames\n",
                     static_cast<unsigned long long>(g_cam_frames_consumed.load()));
     });
 
-    // ── IR consumer thread ───────────────────────────────────────────────────
-    // We don't need IR for this diagnostic, but the queue still has to be
-    // drained or it'll back-pressure the producer.
-    std::printf("[main] spawning IR consumer thread (drain only)\n");
+    // -- IR drain thread
     std::thread ir_thread([&]() {
-        std::printf("[ir] thread started (drain only)\n");
         auto& ir_q = controller.get_ir_queue();
-        while (auto pkt = ir_q.pop()) {
-            ++g_ir_frames_consumed;
-            (void)pkt;
-        }
-        std::printf("[ir] thread exiting — %llu frames drained\n",
-                    static_cast<unsigned long long>(g_ir_frames_consumed.load()));
+        while (auto pkt = ir_q.pop()) { ++g_ir_frames_consumed; (void)pkt; }
     });
 
-    // ── Mic pipeline (always-on) ─────────────────────────────────────────────
-    std::printf("[main] starting mic pipeline\n");
-    Pipeline mic_pipeline(std::move(mic_cfg));
-    mic_pipeline.start();
-
-    // ── Button ───────────────────────────────────────────────────────────────
-    std::printf("[main] registering button callbacks\n");
+    // -- Button: press arms filter, release resets
     button_driver::ButtonDriver btn;
 
     btn.registerPressCallback([&]() {
-        std::printf("\n[button] PRESS  — capture ON, mic active\n");
+        std::printf("\n[button] PRESS -- starting capture, arming filter for \"%s\" (id=%d)\n",
+                    target_word.c_str(), g_target_id);
         std::fflush(stdout);
-        mic_armed.store(true);
         controller.start_capture();
-        std::printf("[cap] capture started\n");
-        std::fflush(stdout);
+        filter.on_intent(g_target_id);
     });
 
     btn.registerReleaseCallback([&]() {
-        std::printf("\n[button] RELEASE  — capture OFF, mic ignored, filter reset\n");
+        std::printf("\n[button] RELEASE -- stopping capture, resetting filter\n");
         std::fflush(stdout);
-        mic_armed.store(false);
         controller.stop_capture();
         filter.reset();
-        std::printf("[cap] capture stopped\n");
-        std::fflush(stdout);
     });
 
-    std::printf("\n────────────────────────────────────────────────────\n");
+    std::printf("\n----------------------------------------------------\n");
     std::printf(" stereo_debug ready.\n");
-    std::printf("  - Hold button to capture frames.\n");
-    std::printf("  - Speak a registered object name while held.\n");
-    std::printf("  - Program will save %d pair(s) then exit.\n", SAVE_PAIRS);
+    std::printf("  - Hold button to capture and filter for \"%s\".\n",
+                target_word.c_str());
+    std::printf("  - Program saves %d pair(s) then exits.\n", SAVE_PAIRS);
     std::printf("  - Output: %s\n", g_output_dir.c_str());
-    std::printf("────────────────────────────────────────────────────\n\n");
+    std::printf("----------------------------------------------------\n\n");
     std::fflush(stdout);
 
-    // ── Main idle loop ───────────────────────────────────────────────────────
-    while (g_running) {
+    while (g_running)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
 
-    // ── Shutdown ─────────────────────────────────────────────────────────────
-    std::printf("\n[main] shutdown initiated\n");
-
+    // -- Shutdown
+    std::printf("\n[main] shutting down\n");
     controller.stop_capture();
-    mic_pipeline.stop();
     controller.shutdown();
     cam_thread.join();
     ir_thread.join();
     hailo.stop();
     gpio::teardownGpio();
 
-    std::printf("\n[main] FINAL: cam_frames=%llu  ir_frames=%llu  "
-                "hailo_cb=%llu  pairs=%llu  saved=%d  mic_drops=%zu\n",
+    std::printf("\n[main] cam_frames=%llu  ir_frames=%llu  hailo_cb=%llu  "
+                "pairs=%llu  saved=%d\n",
                 static_cast<unsigned long long>(g_cam_frames_consumed.load()),
                 static_cast<unsigned long long>(g_ir_frames_consumed.load()),
                 static_cast<unsigned long long>(g_hailo_callbacks.load()),
                 static_cast<unsigned long long>(g_pairs_emitted.load()),
-                g_pairs_saved.load(),
-                mic_pipeline.queue_drops());
-
-    std::printf("[main] goodbye\n");
+                g_pairs_saved.load());
     return 0;
 }

@@ -6,7 +6,7 @@
 
 namespace Config {
 
-inline constexpr const char*       ALSA_DEVICE    = "hw:2,0";
+inline constexpr const char* ALSA_DEVICE = "plughw:CARD=sndrpigooglevoi,DEV=0";
 
 // Capture — googlevoicehat driver native format
 inline constexpr unsigned int      CAP_RATE       = 48000;
@@ -16,7 +16,7 @@ inline constexpr snd_pcm_uframes_t BUFFER_FRAMES  = PERIOD_FRAMES * 4;
 
 // ICS43432: left-justified 24-bit in a 32-bit word, >> 16 gives top 16 bits.
 // Mic capsule is quiet — 8x gain established by record_prepare testing.
-inline constexpr float             MIC_GAIN       = 12.0f;
+inline constexpr float             MIC_GAIN       = 8.0f;
 
 // Vosk requires 16kHz mono int16 PCM
 inline constexpr unsigned int      VOSK_RATE      = 16000;
