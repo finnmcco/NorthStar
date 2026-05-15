@@ -178,3 +178,9 @@ configure_camera_target(ir_calib_capture)
 target_link_libraries(ir_calib_capture PRIVATE
     ${OpenCV_LIBS}
 )
+
+add_executable(capture_frames
+    src/capture_frames.cpp
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(capture_frames)

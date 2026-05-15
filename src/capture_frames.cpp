@@ -1,92 +1,154 @@
 /*
-    capture_frames.cpp  —  NorthStar training data capture
+    capture_frames.cpp  --  save camera frames while button is held
 
-    Space  → capture 50 post-downsampled 640x640 frames from both cameras
-    q      → quit
+    Starts capture on button press, stops on release.
+    Every frame from both cameras is saved as a PNG into a timestamped
+    session directory.
 
-    Output: captured_frames/frame_cam<id>_<DDMMYYYY_HHMMSS>_<n>.png
+    File naming:
+        capture_frames/<session>/frame_cam<id>_<timestamp_ns>.png
+
+    Run as:
+        ./capture_frames
 */
 
 #include "capture_controller.hpp"
+#include "camera_queue.hpp"
+#include "button-driver.h"
+#include "gpio.h"
 
 #include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-#include <filesystem>
-#include <iostream>
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
-#include <termios.h>
-#include <unistd.h>
+#include <thread>
 
-static constexpr int         FRAMES_TO_CAPTURE = 50;
-static constexpr const char* OUTPUT_DIR        = "captured_frames";
+// -- Globals ------------------------------------------------------------------
+std::atomic<bool>  g_running{true};
+static CaptureController* g_controller_ptr = nullptr;
+static std::string g_output_dir;
+static std::atomic<uint64_t> g_frames_saved{0};
 
-// Read one keypress without waiting for Enter
-static char getch()
+static void on_signal(int)
 {
-    struct termios old, raw;
-    tcgetattr(STDIN_FILENO, &old);
-    raw = old;
-    raw.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    char c;
-    read(STDIN_FILENO, &c, 1);
-    tcsetattr(STDIN_FILENO, TCSANOW, &old);
-    return c;
+    g_running = false;
+    if (g_controller_ptr) g_controller_ptr->stop_capture();
 }
 
-static void capture_batch(CameraQueue& cam_q, int batch)
+static std::string make_session_dir()
 {
-    std::time_t now = std::time(nullptr);
-    std::tm*    tm  = std::localtime(&now);
-    char        ts[32];
-    std::strftime(ts, sizeof(ts), "%d%m%Y_%H%M%S", tm);
+    using namespace std::chrono;
+    const auto now = system_clock::to_time_t(system_clock::now());
+    std::tm tm{};
+    localtime_r(&now, &tm);
 
-    int saved = 0;
-    while (saved < FRAMES_TO_CAPTURE) {
-        auto pkt = cam_q.pop();
-        if (!pkt) break;
+    std::ostringstream oss;
+    oss << "capture_frames/" << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    const std::string dir = oss.str();
 
-        // Frame data is 640x640 RGB — flip to BGR before imwrite
-        cv::Mat frame(640, 640, CV_8UC3, pkt->data.data());
-        cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
-
-        std::string path = std::string(OUTPUT_DIR) + "/frame_cam"
-                         + std::to_string(pkt->camera_id) + "_"
-                         + ts + "_b" + std::to_string(batch)
-                         + "_" + std::to_string(saved) + ".png";
-
-        if (!cv::imwrite(path, frame))
-            std::cerr << "\nFailed to write: " << path << "\n";
-
-        ++saved;
-        std::printf("\r  [batch %d]  Saved %d/%d", batch, saved, FRAMES_TO_CAPTURE);
-        std::fflush(stdout);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        std::fprintf(stderr, "[main] FATAL: could not create %s -- %s\n",
+                     dir.c_str(), ec.message().c_str());
+        return {};
     }
-
-    std::printf("\n  Done — %d frames saved.\n\n", saved);
+    return dir;
 }
 
-int main()
+// -- main ---------------------------------------------------------------------
+int main(int /*argc*/, char* /*argv*/[])
 {
-    std::filesystem::create_directories(OUTPUT_DIR);
+    std::signal(SIGINT,  on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    g_output_dir = make_session_dir();
+    if (g_output_dir.empty()) return 1;
+    std::printf("[main] output dir: %s\n", g_output_dir.c_str());
+
+    gpio::setupGpio();
 
     CaptureController controller;
-    controller.start_capture();
-    auto& cam_q = controller.get_cam_queue();
+    g_controller_ptr = &controller;
 
-    std::cout << "Ready. Space = capture " << FRAMES_TO_CAPTURE
-              << " frames,  q = quit\n\n";
+    // -- Camera consumer thread
+    std::thread cam_thread([&]() {
+        auto& cam_q = controller.get_cam_queue();
+        while (auto pkt = cam_q.pop()) {
+            const uint64_t ts_ns = pkt->timestamp_us * 1000ULL;
 
-    int batch = 0;
-    while (true) {
-        char key = getch();
-        if (key == 'q' || key == 'Q') break;
-        if (key == ' ') capture_batch(cam_q, ++batch);
-    }
+            // Build filename: frame_cam<id>_<timestamp_ns>.png
+            char filename[256];
+            std::snprintf(filename, sizeof(filename),
+                          "%s/frame_cam%d_%llu.png",
+                          g_output_dir.c_str(),
+                          pkt->camera_id,
+                          static_cast<unsigned long long>(ts_ns));
+
+            cv::Mat frame(640, 640, CV_8UC3, pkt->data.data());
+            cv::imwrite(filename, frame);
+
+            const uint64_t n = ++g_frames_saved;
+            std::printf("[cam] saved frame #%llu  cam=%d  ts=%llu\n",
+                        static_cast<unsigned long long>(n),
+                        pkt->camera_id,
+                        static_cast<unsigned long long>(ts_ns));
+            std::fflush(stdout);
+        }
+        std::printf("[cam] thread exiting -- %llu frames saved\n",
+                    static_cast<unsigned long long>(g_frames_saved.load()));
+    });
+
+    // -- IR drain thread (must be consumed to avoid back-pressure)
+    std::thread ir_thread([&]() {
+        auto& ir_q = controller.get_ir_queue();
+        while (auto pkt = ir_q.pop()) { (void)pkt; }
+    });
+
+    // -- Button
+    button_driver::ButtonDriver btn;
+
+    btn.registerPressCallback([&]() {
+        std::printf("\n[button] PRESS -- starting capture\n");
+        std::fflush(stdout);
+        controller.start_capture();
+    });
+
+    btn.registerReleaseCallback([&]() {
+        std::printf("\n[button] RELEASE -- stopping capture\n");
+        std::printf("[button] %llu frames saved so far\n",
+                    static_cast<unsigned long long>(g_frames_saved.load()));
+        std::fflush(stdout);
+        controller.stop_capture();
+    });
+
+    std::printf("\n----------------------------------------------------\n");
+    std::printf(" capture_frames ready.\n");
+    std::printf("  - Hold button to capture frames.\n");
+    std::printf("  - Release to stop.\n");
+    std::printf("  - Ctrl-C to exit.\n");
+    std::printf("  - Output: %s\n", g_output_dir.c_str());
+    std::printf("----------------------------------------------------\n\n");
+    std::fflush(stdout);
+
+    while (g_running)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     controller.stop_capture();
-    std::printf("Quit — %d batch(es) captured to ./%s/\n", batch, OUTPUT_DIR);
+    controller.shutdown();
+    cam_thread.join();
+    ir_thread.join();
+    gpio::teardownGpio();
+
+    std::printf("\n[main] done -- %llu frames saved to %s\n",
+                static_cast<unsigned long long>(g_frames_saved.load()),
+                g_output_dir.c_str());
     return 0;
 }
