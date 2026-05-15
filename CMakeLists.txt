@@ -182,5 +182,47 @@ target_link_libraries(ir_calib_capture PRIVATE
 add_executable(capture_frames
     src/capture_frames.cpp
     ${CAMERA_SOURCES}
+    src/gpio.cpp
+    src/button-driver.cpp
+)
+target_link_libraries(capture_frames PRIVATE
+    gpiodcxx
 )
 configure_camera_target(capture_frames)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  audio_record  --  capture raw mic audio (gain=1.0) to AudioTests/
+#  Usage: ./audio_record [seconds]
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(audio_record
+    src/audio_record.cpp
+    src/resampler.cpp
+)
+target_include_directories(audio_record PRIVATE ${COMMON_INCLUDES} ${AUDIO_INCLUDES})
+target_compile_options(audio_record PRIVATE -Wall -Wextra -O2)
+target_link_libraries(audio_record PRIVATE
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+    Threads::Threads
+)
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  audio_test  --  run a WAV file through Vosk with parameterised gain
+#  Usage: ./audio_test <wav> <gain> <model_dir> <word1> [word2 ...]
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(audio_test
+    src/audio_test.cpp
+    src/intent_detector.cpp
+)
+target_include_directories(audio_test PRIVATE ${COMMON_INCLUDES} ${AUDIO_INCLUDES})
+target_compile_options(audio_test PRIVATE -Wall -Wextra -O2)
+target_link_libraries(audio_test PRIVATE
+    ${VOSK_LIB}
+    Threads::Threads
+)
+
+add_executable(stereo_debug_static
+    src/stereo_debug_static.cpp
+    src/stereo_distance.cpp
+)
+configure_camera_target(stereo_debug_static)

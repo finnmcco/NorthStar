@@ -50,7 +50,7 @@ static std::string make_session_dir()
     localtime_r(&now, &tm);
 
     std::ostringstream oss;
-    oss << "capture_frames/" << std::put_time(&tm, "%Y%m%d_%H%M%S");
+    oss << "../" << std::put_time(&tm, "%Y%m%d_%H%M%S");
     const std::string dir = oss.str();
 
     std::error_code ec;

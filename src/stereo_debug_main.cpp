@@ -449,7 +449,7 @@ int main(int argc, char* argv[])
     CaptureController controller;
     g_controller_ptr = &controller;
 
-    StereoDepthEstimator depth("../cam_calibration/stereo_calib_640.yaml");
+    StereoDepthEstimator depth("../cam_calibration/stereo_calib_640_3.yaml");
     g_depth_ptr = &depth;
     std::printf("[main] stereo calibration loaded: baseline=%.3f m\n",
                 depth.baseline_m());
