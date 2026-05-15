@@ -61,6 +61,24 @@ public:
     // Useful for debugging / saving to disk. Empty before first compute() call.
     const cv::Mat& last_disparity() const { return last_disparity_; }
 
+    // Diagnostic accessors: most recent rectified BGR frames. Empty before
+    // the first compute() call. Lifetime tied to the estimator; copy if you
+    // need to retain them after the next compute() call.
+    const cv::Mat& last_left_rect()  const { return left_rect_; }
+    const cv::Mat& last_right_rect() const { return right_rect_; }
+
+    // Calibration accessors — useful when external code wants to do its own
+    // bbox rectification (e.g. for debug overlays). All matrices are owned
+    // by the estimator; do not modify.
+    const cv::Mat& K1() const { return K1_; }
+    const cv::Mat& D1() const { return D1_; }
+    const cv::Mat& R1() const { return R1_; }
+    const cv::Mat& P1() const { return P1_; }
+    const cv::Mat& K2() const { return K2_; }
+    const cv::Mat& D2() const { return D2_; }
+    const cv::Mat& R2() const { return R2_; }
+    const cv::Mat& P2() const { return P2_; }
+
     // Diagnostic accessor: baseline recovered from calibration (metres).
     float baseline_m() const { return baseline_m_; }
 
@@ -71,6 +89,7 @@ private:
 
     // Intrinsics needed for transforming bbox coordinates from raw to rectified
     cv::Mat K1_, D1_, R1_, P1_;
+    cv::Mat K2_, D2_, R2_, P2_;
 
     // SGBM stays alive across calls so we don't pay reconstruction cost
     cv::Ptr<cv::StereoSGBM> sgbm_;

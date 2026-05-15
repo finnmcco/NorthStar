@@ -54,12 +54,12 @@ StereoDepthEstimator::StereoDepthEstimator(const std::string& calibration_yaml_p
     // Intrinsics and rectification matrices
     K1_       = read_required_mat(fs, "K1");
     D1_       = read_required_mat(fs, "D1");
-    cv::Mat K2 = read_required_mat(fs, "K2");
-    cv::Mat D2 = read_required_mat(fs, "D2");
+    K2_       = read_required_mat(fs, "K2");
+    D2_       = read_required_mat(fs, "D2");
     R1_       = read_required_mat(fs, "R1");
     P1_       = read_required_mat(fs, "P1");
-    cv::Mat R2 = read_required_mat(fs, "R2");
-    cv::Mat P2 = read_required_mat(fs, "P2");
+    R2_       = read_required_mat(fs, "R2");
+    P2_       = read_required_mat(fs, "P2");
     Q_        = read_required_mat(fs, "Q");
 
     // Optional: stored baseline for diagnostics
@@ -72,12 +72,12 @@ StereoDepthEstimator::StereoDepthEstimator(const std::string& calibration_yaml_p
     // CV_32FC1 with no meaningful accuracy loss for our resolution.
     cv::initUndistortRectifyMap(K1_, D1_, R1_, P1_, image_size_,
                                 CV_16SC2, map1_left_, map2_left_);
-    cv::initUndistortRectifyMap(K2,  D2,  R2,  P2,  image_size_,
+    cv::initUndistortRectifyMap(K2_, D2_, R2_, P2_, image_size_,
                                 CV_16SC2, map1_right_, map2_right_);
 
     // P2[0,3] = -fx * baseline_in_metres. We use this directly for depth:
     // Z = -P2[0,3] / disparity = fx_baseline / disparity.
-    fx_baseline_ = -static_cast<float>(P2.at<double>(0, 3));
+    fx_baseline_ = -static_cast<float>(P2_.at<double>(0, 3));
     if (fx_baseline_ <= 0.0f) {
         throw std::runtime_error("Calibration P2 matrix has invalid fx*baseline product");
     }

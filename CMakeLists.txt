@@ -144,6 +144,24 @@ target_link_libraries(integrated_main PRIVATE
     gpiodcxx
 )
 
+add_executable(stereo_debug_main
+    src/stereo_debug_main.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
+    src/gpio.cpp
+    src/button-driver.cpp
+    src/stereo_distance.cpp
+)
+configure_camera_target(stereo_debug_main)
+target_include_directories(stereo_debug_main PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(stereo_debug_main PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+    gpiodcxx
+)
+
 add_executable(test_stereo_depth
     src/test_stereo_depth.cpp
     src/stereo_distance.cpp
