@@ -237,3 +237,12 @@ target_link_libraries(stereo_infer_static PRIVATE
     ${OpenCV_LIBS}
     ${HAILO_LIB}
 )
+
+add_executable(stereo_manual
+    src/stereo_manual_bbox.cpp
+    src/stereo_distance.cpp
+)
+target_include_directories(stereo_manual PRIVATE include)
+target_link_libraries(stereo_manual PRIVATE
+    ${OpenCV_LIBS}
+)
