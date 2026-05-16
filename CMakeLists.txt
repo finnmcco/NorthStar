@@ -51,7 +51,7 @@ set(AUDIO_INCLUDES
 #  Source groups
 # ─────────────────────────────────────────────────────────────────────────────
 set(INFERENCE_SOURCES
-    src/inference/hailo8_inference.cpp
+    src/hailo8_inference.cpp
     src/detection_utils.cpp
 )
 
@@ -126,7 +126,7 @@ endmacro()
 #)
 
 add_executable(integrated_main
-    src/integrated_main.cpp
+    src/integrated_main_2.cpp
     ${INFERENCE_SOURCES}
     ${CAMERA_SOURCES}
     ${AUDIO_SOURCES}
@@ -226,3 +226,14 @@ add_executable(stereo_debug_static
     src/stereo_distance.cpp
 )
 configure_camera_target(stereo_debug_static)
+
+add_executable(stereo_infer_static
+    src/stereo_infer_static.cpp
+    ${INFERENCE_SOURCES}
+    src/stereo_distance.cpp
+)
+target_include_directories(stereo_infer_static PRIVATE include)
+target_link_libraries(stereo_infer_static PRIVATE
+    ${OpenCV_LIBS}
+    ${HAILO_LIB}
+)

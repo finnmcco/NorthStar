@@ -33,7 +33,7 @@
 #include "pipeline.hpp"
 #include "button-driver.h"
 #include "gpio.h"
-#include "inference/hailo8_inference.hpp"
+#include "hailo8_inference.hpp"
 #include "frame_buffer.hpp"
 #include "stereo_distance.hpp"
 
@@ -369,7 +369,7 @@ int main(int argc, char* argv[])
     g_controller_ptr = &controller;
 
     std::printf("[main] loading stereo calibration\n");
-    StereoDepthEstimator depth("../cam_calibration/stereo_calib_640.yaml");  // adjust path as needed
+    StereoDepthEstimator depth("../cam_calibration/stereo_calib_best.yaml");  // adjust path as needed
     g_depth_ptr = &depth;
     std::printf("[main] stereo calibration loaded: baseline=%.3f m\n", depth.baseline_m());
 

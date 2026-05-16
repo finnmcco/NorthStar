@@ -1,4 +1,4 @@
-#include "inference/hailo8_inference.hpp"
+#include "hailo8_inference.hpp"
 #include <iostream>
 
 using namespace hailort;

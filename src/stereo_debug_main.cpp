@@ -27,7 +27,7 @@
 #include "inference_packet.hpp"
 #include "button-driver.h"
 #include "gpio.h"
-#include "inference/hailo8_inference.hpp"
+#include "hailo8_inference.hpp"
 #include "frame_buffer.hpp"
 #include "stereo_distance.hpp"
 
