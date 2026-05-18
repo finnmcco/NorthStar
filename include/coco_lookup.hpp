@@ -29,6 +29,12 @@ inline constexpr const char* COCO_CLASSES[80] = {
 
 inline uint8_t coco_id_for_word(const std::string& word)
 {
+    // Voice-friendly aliases. COCO's official class is "cell phone", but users
+    // are more likely to say "phone".
+    if (word == "phone" || word == "cellphone" || word == "mobile" || word == "mobile phone") {
+        return 67;  // COCO class: cell phone
+    }
+
     for (int i = 0; i < 80; ++i) {
         if (word == COCO_CLASSES[i]) {
             return static_cast<uint8_t>(i);

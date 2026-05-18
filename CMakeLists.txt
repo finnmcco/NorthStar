@@ -20,6 +20,10 @@ find_package(Threads   REQUIRED)
 # Camera
 pkg_check_modules(LIBCAMERA REQUIRED libcamera)
 
+# Speech output — PulseAudio simple API (PipeWire's PA compat layer fronts the
+# I²S MAX98357A on the Pi 5). Required by integrated_main_audio.
+pkg_check_modules(PULSE REQUIRED IMPORTED_TARGET libpulse-simple libpulse)
+
 # Hailo — libs at /usr/lib, headers at /usr/include on this Pi
 find_library(HAILO_LIB  hailort   HINTS /usr/lib               REQUIRED)
 find_path   (HAILO_INCLUDE hailo/hailort.hpp HINTS /usr/include REQUIRED)
@@ -144,6 +148,34 @@ target_link_libraries(integrated_main PRIVATE
     gpiodcxx
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  integrated_main_audio  --  same pipeline as integrated_main, plus Piper TTS
+#  output through the I²S speaker.  Source lives in src/integrated_main_audio.cpp
+#  and pulls in the TTS engine (tts.cpp) + libpulse speaker wrapper (speaker.cpp)
+#  from the NorthStar-tts_pipeline drop-in.
+# ─────────────────────────────────────────────────────────────────────────────
+add_executable(integrated_main_audio
+    src/integrated_main_audio.cpp
+    src/speaker.cpp
+    src/tts.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+    ${AUDIO_SOURCES}
+    src/gpio.cpp
+    src/button-driver.cpp
+    src/stereo_distance.cpp
+    src/ir_aligner.cpp
+)
+configure_camera_target(integrated_main_audio)
+target_include_directories(integrated_main_audio PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(integrated_main_audio PRIVATE
+    ${VOSK_LIB}
+    ${ALSA_LIBRARIES}
+    ${SAMPLERATE_LIBRARIES}
+    gpiodcxx
+    PkgConfig::PULSE
+)
+
 add_executable(stereo_debug_main
     src/stereo_debug_main.cpp
     ${INFERENCE_SOURCES}
@@ -236,13 +268,4 @@ target_include_directories(stereo_infer_static PRIVATE include)
 target_link_libraries(stereo_infer_static PRIVATE
     ${OpenCV_LIBS}
     ${HAILO_LIB}
-)
-
-add_executable(stereo_manual
-    src/stereo_manual_bbox.cpp
-    src/stereo_distance.cpp
-)
-target_include_directories(stereo_manual PRIVATE include)
-target_link_libraries(stereo_manual PRIVATE
-    ${OpenCV_LIBS}
 )
