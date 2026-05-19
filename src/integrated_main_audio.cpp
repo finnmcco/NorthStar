@@ -761,7 +761,7 @@ int main(int argc, char* argv[])
     g_controller_ptr = &controller;
 
     dbg_printf(DBG_MAIN, "[main] loading stereo calibration\n");
-    StereoDepthEstimator depth("../cam_calibration/stereo_calib_best.yaml");  // adjust path as needed
+    StereoDepthEstimator depth("../cam_calibration/stereo_new.yaml");  // adjust path as needed
     g_depth_ptr = &depth;
     dbg_printf(DBG_MAIN, "[main] stereo calibration loaded: baseline=%.3f m\n", depth.baseline_m());
 

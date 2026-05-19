@@ -269,3 +269,9 @@ target_link_libraries(stereo_infer_static PRIVATE
     ${OpenCV_LIBS}
     ${HAILO_LIB}
 )
+
+add_executable(inf_bench
+    src/inf_bench.cpp
+    ${INFERENCE_SOURCES}
+)
+configure_target(inf_bench)

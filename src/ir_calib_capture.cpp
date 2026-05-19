@@ -44,7 +44,7 @@
 namespace fs = std::filesystem;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-static constexpr const char* OUTPUT_DIR    = "ir_calib";
+static constexpr const char* OUTPUT_DIR    = "ir_calib_50cm";
 static constexpr int         IR_WIDTH      = 32;
 static constexpr int         IR_HEIGHT     = 24;
 static constexpr int         IR_DISPLAY_SCALE = 16;
