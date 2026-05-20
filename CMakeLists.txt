@@ -203,7 +203,7 @@ target_link_libraries(test_stereo_depth PRIVATE ${OpenCV_LIBS})
 #configure_camera_target(capture_frames)
  
 add_executable(ir_calib_capture
-    src/ir_calib_capture.cpp
+    src/ir_calib_capture_timed.cpp
     ${CAMERA_SOURCES}
 )
 configure_camera_target(ir_calib_capture)

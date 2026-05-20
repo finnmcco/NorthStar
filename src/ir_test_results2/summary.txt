@@ -1,0 +1,57 @@
+IR Alignment Test — Summary
+Calibration switch: <= 1.25 m → yaml1, > 1.25 m → yaml2
+Error metric: centre error between projected bbox centroid and manually-drawn IR ground-truth bbox centroid (IR pixels)
+
+Label              Dist(m)  YAML                    CentreErr(px)
+────────────────────────────────────────────────────────────────────
+100cm_pair_06         1.00  ir_align_100                    0.707
+100cm_pair_08         1.00  ir_align_100                    1.414
+100cm_pair_10         1.00  ir_align_100                    1.000
+100cm_pair_17         1.00  ir_align_100                    0.707
+100cm_pair_18         1.00  ir_align_100                    0.500
+        mean ± std    1.00                               0.866 ± 0.317  [H1]
+
+125cm_pair_05         1.25  ir_align_100                    0.707
+125cm_pair_08         1.25  ir_align_100                    1.118
+125cm_pair_10         1.25  ir_align_100                    0.707
+125cm_pair_13         1.25  ir_align_100                    0.500
+125cm_pair_15         1.25  ir_align_100                    1.000
+        mean ± std    1.25                               0.806 ± 0.223  [H1]
+
+150cm_pair_01         1.50  ir_align_150                    4.031
+150cm_pair_04         1.50  ir_align_150                    2.550
+150cm_pair_07         1.50  ir_align_150                    1.000
+150cm_pair_12         1.50  ir_align_150                    6.519
+150cm_pair_15         1.50  ir_align_150                    0.707
+        mean ± std    1.50                               2.961 ± 2.140  [H2]
+
+175cm_pair_01         1.75  ir_align_150                    3.536
+175cm_pair_09         1.75  ir_align_150                    3.162
+175cm_pair_15         1.75  ir_align_150                    4.000
+175cm_pair_20         1.75  ir_align_150                    5.590
+175cm_pair_35         1.75  ir_align_150                    2.550
+        mean ± std    1.75                               3.767 ± 1.028  [H2]
+
+200cm_pair_01         2.00  ir_align_150                    2.500
+200cm_pair_08         2.00  ir_align_150                    1.118
+200cm_pair_11         2.00  ir_align_150                    0.707
+200cm_pair_16         2.00  ir_align_150                    4.031
+200cm_pair_44         2.00  ir_align_150                    0.707
+        mean ± std    2.00                               1.813 ± 1.290  [H2]
+
+225cm_pair_01         2.25  ir_align_150                    2.550
+225cm_pair_08         2.25  ir_align_150                    2.000
+225cm_pair_11         2.25  ir_align_150                    0.707
+225cm_pair_14         2.25  ir_align_150                    0.500
+225cm_pair_15         2.25  ir_align_150                    0.000
+        mean ± std    2.25                               1.151 ± 0.961  [H2]
+
+250cm_pair_02         2.50  ir_align_150                    1.414
+250cm_pair_09         2.50  ir_align_150                    1.000
+250cm_pair_13         2.50  ir_align_150                    4.301
+250cm_pair_27         2.50  ir_align_150                    5.657
+250cm_pair_41         2.50  ir_align_150                    6.021
+        mean ± std    2.50                               3.679 ± 2.102  [H2]
+
+Overall mean : 2.149 IR px
+Overall std  : 1.811 IR px

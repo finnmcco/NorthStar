@@ -1,0 +1,15 @@
+IR Alignment Test — Summary
+Calibration depth: 0.50 m
+Thermal threshold: 40.0 °C
+
+Label          Dist(m)   CentreErr(px)  Overlap   HotPx
+────────────────────────────────────────────────────────────
+50cm_pair_147     0.50           1.577    1.000       4
+50cm_pair_98      0.50           0.454    1.000       3
+  mean±std        0.50        1.015±0.561    1.000 ← calib
+
+100cm_pair_214    1.00           1.414    1.000       1
+  (single)        1.00           1.414    1.000
+
+Overall mean centre error:   1.148 IR px
+Overall mean overlap:        1.000

@@ -1,0 +1,17 @@
+%YAML:1.0
+---
+H: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ -1284.998422250774, -1833.1627817539295, 848.48050630839884,
+       -1600.49637497917, -159.96622360844438, 389.95979285483691,
+       -46.323499781838628, -48.879608829038119, 1. ]
+ir_width: 32
+ir_height: 24
+cam_size: 640
+calibration_depth_m: 0.5
+mean_reprojection_err_px: 0.28549684584140778
+n_correspondences: 6
+n_inliers: 6
+calibrated_unix: 1779244046
