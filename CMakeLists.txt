@@ -275,3 +275,23 @@ add_executable(inf_bench
     ${INFERENCE_SOURCES}
 )
 configure_target(inf_bench)
+
+add_executable(annotate_image
+    src/annotate_image.cpp
+    ${INFERENCE_SOURCES}
+)
+configure_target(annotate_image)
+
+add_executable(latency_bench
+    src/latency_bench.cpp
+    src/speaker.cpp
+    src/tts.cpp
+    src/detection_filter.cpp
+    ${INFERENCE_SOURCES}
+    ${CAMERA_SOURCES}
+)
+configure_camera_target(latency_bench)
+target_include_directories(latency_bench PRIVATE ${AUDIO_INCLUDES})
+target_link_libraries(latency_bench PRIVATE
+    PkgConfig::PULSE
+)

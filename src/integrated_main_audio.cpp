@@ -48,11 +48,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
@@ -98,6 +100,14 @@ static std::atomic<uint32_t> g_debug_mask{DBG_MAIN | DBG_BUTTON | DBG_CAP |
                                           DBG_TEMP | DBG_SPEECH};
 static constexpr double g_speech_gain = 1.0;  // TTS gain fixed at unity for now
 static constexpr const char* kDefaultVoskModelDir = "../model_inf/vosk-model-small-en-us-0.15";
+
+// ─── Piper TTS configuration ─────────────────────────────────────────────────
+// Passed to SpeechAggregator so the persistent TTSEngine subprocess (and its
+// 65 MB ONNX model) is loaded exactly once at startup rather than per utterance.
+// Override at runtime with --piper-bin=<path> / --piper-model=<path> if needed.
+static const char* g_piper_bin   = "/home/dst5/NSJamie/NorthStar/.venv/bin/piper";
+static const char* g_piper_model = "/home/dst5/NSJamie/NorthStar/model_inf/en_US-lessac-medium.onnx";
+static constexpr int kTtsSampleRate = 22050;
 
 static bool dbg_on(uint32_t bit) {
     return (g_debug_mask.load() & bit) != 0;
@@ -157,8 +167,12 @@ static void print_usage(const char* argv0) {
         "                        Categories: main,button,cap,cam,ir,hailo,mic,filter,depth,temp,speech,save\n"
         "                        Special values: all, none, quiet\n"
         "                        Default: main,button,cap,mic,filter,depth,temp,speech\n"
-        "  --vosk-model=<dir>     Override Vosk model directory.\n"
+        "  --vosk-model=<dir>    Override Vosk model directory.\n"
         "                        Default: ../model_inf/vosk-model-small-en-us-0.15\n"
+        "  --piper-bin=<path>    Path to piper executable.\n"
+        "                        Default: /usr/local/bin/piper\n"
+        "  --piper-model=<path>  Path to Piper .onnx voice model.\n"
+        "                        Default: /opt/piper/en_US-lessac-medium.onnx\n"
         "  --speech-gain=<N>     Accepted for compatibility, but ignored; gain is fixed at 1.0.\n"
         "  --help                Show this help.\n"
         "\n"
@@ -353,6 +367,102 @@ static FrameBuffer g_frame_buf_cam0;
 static FrameBuffer g_frame_buf_cam1;
 static StereoDepthEstimator* g_depth_ptr = nullptr;
 
+// ─── Distance-validation tunables ────────────────────────────────────────────
+// Pairs with depth > kMaxValidDistanceM are hard-rejected before they reach
+// the agreement window. Pairs that pass that check accumulate in a sliding
+// window of size kAgreementWindow; once kAgreementRequired of those agree to
+// within kAgreementToleranceFrac of each other, we report the median of the
+// agreeing subset.
+static constexpr float kMaxValidDistanceM       = 3.5f;
+static constexpr size_t kAgreementWindow        = 6;
+static constexpr size_t kAgreementRequired      = 3;
+static constexpr float  kAgreementToleranceFrac = 0.10f;  // 10 %
+
+// One pace ≈ 0.75 m (close to British military pace, comfortable adult stride).
+static constexpr float kMetresPerPace = 0.75f;
+
+// Room-temperature band — outside this we describe the object qualitatively
+// (cool / warm / hot) rather than naming a number.
+static constexpr float kRoomTempLowC  = 18.0f;
+static constexpr float kRoomTempHighC = 25.0f;
+static constexpr float kHotThresholdC = 35.0f;
+
+// Rolling window of recently accepted distances within the current session.
+// Held under g_agreement_mutex. Cleared on button press alongside filter.reset()
+// and speech_aggregator.reset().
+//
+// Single-threaded in practice (DetectionFilter serialises pair callbacks) but
+// the press callback runs on the button thread, so we still need the mutex
+// to make the clear-on-press race-free.
+static std::mutex            g_agreement_mutex;
+static std::deque<float>     g_recent_distances;
+
+// Returns the median of an agreeing subset of >= kAgreementRequired samples
+// from the rolling window where max/min <= 1 + kAgreementToleranceFrac.
+// Empty optional means no such subset exists yet.
+static std::optional<float> check_agreement()
+{
+    std::lock_guard<std::mutex> lk(g_agreement_mutex);
+    if (g_recent_distances.size() < kAgreementRequired) return std::nullopt;
+
+    // Sort a copy; slide a window of kAgreementRequired entries; the first
+    // window with max/min within tolerance wins. The median of that window
+    // is what we report.
+    std::vector<float> sorted(g_recent_distances.begin(), g_recent_distances.end());
+    std::sort(sorted.begin(), sorted.end());
+
+    const float ratio_limit = 1.0f + kAgreementToleranceFrac;
+    for (size_t i = 0; i + kAgreementRequired <= sorted.size(); ++i) {
+        const float lo = sorted[i];
+        const float hi = sorted[i + kAgreementRequired - 1];
+        if (lo > 0 && hi / lo <= ratio_limit) {
+            return sorted[i + kAgreementRequired / 2];  // median of the window
+        }
+    }
+    return std::nullopt;
+}
+
+static void push_distance(float d_m)
+{
+    std::lock_guard<std::mutex> lk(g_agreement_mutex);
+    g_recent_distances.push_back(d_m);
+    while (g_recent_distances.size() > kAgreementWindow)
+        g_recent_distances.pop_front();
+}
+
+static void clear_distances()
+{
+    std::lock_guard<std::mutex> lk(g_agreement_mutex);
+    g_recent_distances.clear();
+}
+
+// Snapshot of the current buffer for logging without holding the lock during printf.
+static std::vector<float> snapshot_distances()
+{
+    std::lock_guard<std::mutex> lk(g_agreement_mutex);
+    return {g_recent_distances.begin(), g_recent_distances.end()};
+}
+
+// ─── Phrase builders ─────────────────────────────────────────────────────────
+static std::string distance_phrase(float d_m)
+{
+    if (d_m < 1.0f) return "within arms reach";
+    const int paces = static_cast<int>(std::lround(d_m / kMetresPerPace));
+    if (paces <= 1) return "around 1 pace away";
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "around %d paces away", paces);
+    return buf;
+}
+
+static std::string temperature_phrase(float t_c)
+{
+    if (t_c >= kRoomTempLowC && t_c <= kRoomTempHighC)
+        return "It looks like it's at room temperature.";
+    if (t_c < kRoomTempLowC)      return "It feels cool.";
+    if (t_c <= kHotThresholdC)    return "It feels warm.";
+    return "It feels hot.";
+}
+
 static void on_signal(int /*sig*/)
 {
     g_running = false;
@@ -433,9 +543,30 @@ static void on_filtered_pair(FilteredInferencePair pair)
     auto depth_m = g_depth_ptr->compute(left, right, best_cam0->box);
 
     if (depth_m) {
-        dbg_printf(DBG_DEPTH, "[depth] Z = %.2f m  (object_id=%d)\n",
-                    *depth_m, pair.object_id);
-        output_report.distance = *depth_m;
+        if (*depth_m > kMaxValidDistanceM) {
+            // Hard-reject: don't pollute the agreement window with what is
+            // almost certainly a mismatched-pair / textureless artefact.
+            dbg_printf(DBG_DEPTH,
+                "[depth] REJECT Z = %.2f m > %.2f m (not added to agreement window)\n",
+                *depth_m, kMaxValidDistanceM);
+            std::fflush(stdout);
+            depth_m.reset();
+        } else {
+            dbg_printf(DBG_DEPTH, "[depth] Z = %.2f m  (object_id=%d)\n",
+                        *depth_m, pair.object_id);
+            output_report.distance = *depth_m;
+            push_distance(*depth_m);
+
+            if (dbg_on(DBG_FILTER)) {
+                const auto snap = snapshot_distances();
+                std::printf("[filter] agreement window (%zu/%zu): [",
+                            snap.size(), kAgreementWindow);
+                for (size_t i = 0; i < snap.size(); ++i)
+                    std::printf("%s%.2f", i ? ", " : "", snap[i]);
+                std::printf("]\n");
+                std::fflush(stdout);
+            }
+        }
     } else {
         dbg_printf(DBG_DEPTH, "[depth] could not compute (textureless / out of range / "
                     "bbox outside rectified image)\n");
@@ -523,6 +654,26 @@ static void on_filtered_pair(FilteredInferencePair pair)
         return;
     }
 
+    // ── Agreement gate ──────────────────────────────────────────────────────
+    // Only speak when the rolling window contains a coherent set of distance
+    // estimates. Until then, we've still done the per-pair work (depth + IR
+    // + direction) — we just hold back on actually speaking.
+    auto agreed_distance = check_agreement();
+    if (!agreed_distance) {
+        dbg_printf(DBG_FILTER,
+            "[agree] not enough agreement yet (window has %zu samples; need "
+            "%zu agreeing within %.0f%%)\n",
+            snapshot_distances().size(),
+            kAgreementRequired,
+            kAgreementToleranceFrac * 100.0f);
+        std::fflush(stdout);
+        return;
+    }
+    dbg_printf(DBG_FILTER,
+        "[agree] OK — reporting median agreed distance = %.2f m\n",
+        *agreed_distance);
+    std::fflush(stdout);
+
     // If a new button press happened while this pair was being processed, this
     // result belongs to the previous interaction and must not speak in the new
     // session. Also require that the mic armed a target during this same session.
@@ -538,15 +689,24 @@ static void on_filtered_pair(FilteredInferencePair pair)
         return;
     }
 
-    // Build the sentence once so we can both log it and hand it to the
-    // speech aggregator.
+    // Build the natural-language sentence using the friendlier phrasing:
+    //   distance: "within arms reach" / "around N paces away"
+    //   temperature: qualitative band rather than a numeric reading.
+    const std::string dist_phrase = distance_phrase(*agreed_distance);
+    const std::string temp_phrase = temperature_phrase(*output_report.temp);
+
+    // Overwrite the reported distance with the agreed-on median so any
+    // downstream consumer of OutputReport sees the consensus value, not the
+    // last raw sample.
+    output_report.distance = *agreed_distance;
+
     char sentence_buf[256];
     std::snprintf(sentence_buf, sizeof(sentence_buf),
-        "Your %s is in the %s of your vision, about %.2f metres away. It is %.2f degrees C.",
+        "Your %s is in the %s of your vision, %s. %s",
         object_name,
         output_report.direction.c_str(),
-        *output_report.distance,
-        *output_report.temp);
+        dist_phrase.c_str(),
+        temp_phrase.c_str());
 
     dbg_printf(DBG_SPEECH, "[speech] sentence: %s\n", sentence_buf);
     std::fflush(stdout);
@@ -585,6 +745,27 @@ int main(int argc, char* argv[])
                 print_usage(argv[0]);
                 return 1;
             }
+        } else if (arg.rfind("--piper-bin=", 0) == 0) {
+            const std::string val = arg.substr(std::strlen("--piper-bin="));
+            if (val.empty()) {
+                std::fprintf(stderr, "[main] ERROR: --piper-bin requires a path.\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+            // Store in a durable std::string; g_piper_bin points into it.
+            static std::string s_piper_bin_store;
+            s_piper_bin_store = val;
+            g_piper_bin = s_piper_bin_store.c_str();
+        } else if (arg.rfind("--piper-model=", 0) == 0) {
+            const std::string val = arg.substr(std::strlen("--piper-model="));
+            if (val.empty()) {
+                std::fprintf(stderr, "[main] ERROR: --piper-model requires a path.\n");
+                print_usage(argv[0]);
+                return 1;
+            }
+            static std::string s_piper_model_store;
+            s_piper_model_store = val;
+            g_piper_model = s_piper_model_store.c_str();
         } else if (arg.rfind("--speech-gain=", 0) == 0) {
             // Accepted for compatibility with older run commands, but ignored.
             // Speech gain is intentionally hardcoded to 1.0 for now.
@@ -784,7 +965,7 @@ int main(int argc, char* argv[])
     }
 
     // IR Aligner -------------------
-    IRAligner ir_aligner("../cam_calibration/ir_alignment.yaml");
+    IRAligner ir_aligner("../src/ir_align_100.yaml");
     g_ir_aligner_ptr = &ir_aligner;
 
     //Temp estimator ----------
@@ -796,8 +977,23 @@ int main(int argc, char* argv[])
     g_dir_estimator_ptr = &dir_estimator;
 
     //Speech aggregator -------
-    dbg_printf(DBG_SPEECH, "[main] creating SpeechAggregator\n");
-    SpeechAggregator speech_aggregator(g_speech_gain, dbg_on(DBG_SPEECH));
+    // TTSEngine is constructed inside SpeechAggregator.  Piper and the ONNX
+    // model are loaded here once; all subsequent synthesise() calls go to the
+    // persistent subprocess rather than forking a new process per utterance.
+    dbg_printf(DBG_SPEECH, "[main] creating SpeechAggregator (piper: %s  model: %s)\n",
+               g_piper_bin, g_piper_model);
+    SpeechAggregator speech_aggregator(g_speech_gain, dbg_on(DBG_SPEECH),
+                                       g_piper_bin, g_piper_model, kTtsSampleRate);
+    if (!speech_aggregator.tts_ready()) {
+        std::fprintf(stderr,
+            "[main] FATAL: TTSEngine failed to start: %s\n"
+            "       Check --piper-bin and --piper-model paths.\n"
+            "       Run setup_tts.sh to install Piper if needed.\n",
+            speech_aggregator.tts_error().c_str());
+        gpio::teardownGpio();
+        return 1;
+    }
+    dbg_printf(DBG_SPEECH, "[main] TTSEngine ready — Piper subprocess running\n");
     g_speech_ptr = &speech_aggregator;
     // ── Camera consumer thread ───────────────────────────────────────────────
     dbg_printf(DBG_CAM, "[main] spawning cam consumer thread\n");
@@ -886,6 +1082,7 @@ int main(int argc, char* argv[])
 
         filter.reset();
         speech_aggregator.reset();
+        clear_distances();
         mic_armed.store(true);
 
         controller.start_capture();

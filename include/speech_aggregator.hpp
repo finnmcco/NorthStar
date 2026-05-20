@@ -17,6 +17,14 @@
 //            spoken_ is atomic and speak() is serialised by speech_mutex_
 //            so overlapping calls across rapid press/release cycles cannot
 //            re-enter Piper or libpulse.
+//
+// TTS change (persistent Piper):
+//   TTSEngine is now constructed with explicit piper_bin / model_path /
+//   sample_rate arguments passed through from main().  The subprocess is
+//   spawned once at construction; synthesise() reuses it for every utterance,
+//   avoiding the ~2.4 s per-call model-load cost of the old std::system()
+//   design.  apply_gain() now works directly on the int16_t PCM vector
+//   returned by synthesise() rather than on a WAV byte buffer.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "tts.hpp"
@@ -34,8 +42,24 @@
 
 class SpeechAggregator {
 public:
-    explicit SpeechAggregator(double gain = 1.0, bool verbose = true)
-        : gain_(gain), verbose_(verbose)
+    // Construct with explicit Piper paths so TTSEngine spawns the subprocess
+    // exactly once here rather than per utterance.
+    //
+    // @param gain        Linear PCM gain applied before playback (1.0 = unity).
+    // @param verbose     If false, suppress all [speech] log lines.
+    // @param piper_bin   Full path to the piper executable.
+    // @param model_path  Full path to the .onnx voice model.
+    // @param sample_rate Expected sample rate of the model (default 22050).
+    explicit SpeechAggregator(double      gain        = 1.0,
+                               bool        verbose     = true,
+                               const char* piper_bin   = "/home/dst5/NSJamie/NorthStar/.venv/bin/piper",
+                               const char* model_path  = "/home/dst5/NSJamie/NorthStar/model_inf/en_US-lessac-medium.onnx",
+                               int         sample_rate = 22050)
+        : tts_(piper_bin, model_path, sample_rate)
+        , gain_(gain)
+        , verbose_(verbose)
+        , piper_bin_(piper_bin)
+        , model_path_(model_path)
     {
         if (gain_ <= 0.0 || !std::isfinite(gain_)) gain_ = 1.0;
 
@@ -45,7 +69,7 @@ public:
         if (!tts_.ready()) {
             std::fprintf(stderr,
                 "[speech] DISABLED: TTS not ready — %s\n",
-                tts_.last_error().c_str());
+                tts_.error_message().c_str());
             return;
         }
         if (!spk_.open()) {
@@ -56,14 +80,19 @@ public:
         }
         enabled_ = true;
         log("[speech] ENABLED\n");
-        log("[speech]   piper : %s\n", tts_.piper_path().c_str());
-        log("[speech]   voice : %s\n", tts_.voice_path().c_str());
+        log("[speech]   piper : %s\n", piper_bin_.c_str());
+        log("[speech]   model : %s\n", model_path_.c_str());
+        log("[speech]   rate  : %d Hz\n", tts_.sample_rate());
         log("[speech]   gain  : %.2fx\n", gain_);
         std::fflush(stdout);
     }
 
     SpeechAggregator(const SpeechAggregator&)            = delete;
     SpeechAggregator& operator=(const SpeechAggregator&) = delete;
+
+    // ── Status pass-throughs (used by main() for fail-fast startup check) ───
+    [[nodiscard]] bool        tts_ready() const noexcept { return tts_.ready(); }
+    [[nodiscard]] std::string tts_error() const          { return tts_.error_message(); }
 
     // Hand the next finalised report + its rendered sentence to the
     // aggregator.  First call per session speaks; subsequent calls drop.
@@ -94,54 +123,28 @@ public:
         std::fflush(stdout);
     }
 
-    [[nodiscard]] bool enabled() const noexcept { return enabled_; }
-    [[nodiscard]] double gain() const noexcept { return gain_; }
-
-    [[nodiscard]] bool already_spoken() const noexcept {
+    [[nodiscard]] bool   enabled()       const noexcept { return enabled_; }
+    [[nodiscard]] double gain()          const noexcept { return gain_; }
+    [[nodiscard]] bool   already_spoken() const noexcept {
         return spoken_.load(std::memory_order_acquire);
     }
 
 private:
-    static int16_t read_i16le(const uint8_t* p) {
-        return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
-                                    (static_cast<uint16_t>(p[1]) << 8));
-    }
-
-    static void write_i16le(uint8_t* p, int16_t v) {
-        const auto u = static_cast<uint16_t>(v);
-        p[0] = static_cast<uint8_t>(u & 0xFFu);
-        p[1] = static_cast<uint8_t>((u >> 8) & 0xFFu);
-    }
-
-    bool apply_gain(std::vector<uint8_t>& wav) {
+    // Apply linear gain in-place to a raw int16_t PCM vector.
+    // Returns true (always succeeds; clamp handles overflow).
+    bool apply_gain(std::vector<int16_t>& pcm) {
         if (std::abs(gain_ - 1.0) < 0.001) return true;
 
-        WavInfo info{};
-        if (!Speaker::parse_wav_header(wav.data(), wav.size(), info)) {
-            std::fprintf(stderr, "[speech] gain skipped: could not parse WAV header\n");
-            return false;
-        }
-        if (info.bits_per_sample != 16) {
-            std::fprintf(stderr, "[speech] gain skipped: expected 16-bit PCM WAV\n");
-            return false;
-        }
-
-        const size_t avail   = wav.size() - info.data_offset;
-        const size_t nbytes  = std::min<size_t>(info.data_size, avail);
-        const size_t samples = nbytes / sizeof(int16_t);
         size_t clipped = 0;
-
-        uint8_t* pcm = wav.data() + info.data_offset;
-        for (size_t i = 0; i < samples; ++i) {
-            const int16_t in = read_i16le(pcm + i * 2);
-            double y = static_cast<double>(in) * gain_;
-            if (y > 32767.0) { y = 32767.0; ++clipped; }
+        for (int16_t& s : pcm) {
+            double y = static_cast<double>(s) * gain_;
+            if (y >  32767.0) { y =  32767.0; ++clipped; }
             if (y < -32768.0) { y = -32768.0; ++clipped; }
-            write_i16le(pcm + i * 2, static_cast<int16_t>(std::lrint(y)));
+            s = static_cast<int16_t>(std::lrint(y));
         }
 
         log("[speech] applied gain %.2fx to %zu samples (clipped=%zu)\n",
-            gain_, samples, clipped);
+            gain_, pcm.size(), clipped);
         return true;
     }
 
@@ -159,27 +162,34 @@ private:
         log("[speech] speaking: \"%s\"\n", text.c_str());
         std::fflush(stdout);
 
-        auto wav = tts_.synthesise_wav(text);
-        if (wav.empty()) {
+        // synthesise() returns raw int16_t PCM — no temp file, no WAV header.
+        // Model stays resident in the Piper subprocess; this call costs
+        // inference time only (~100-300 ms on aarch64).
+        auto pcm = tts_.synthesise(text);
+        if (pcm.empty()) {
             std::fprintf(stderr,
                 "[speech] synthesise failed: %s\n",
-                tts_.last_error().c_str());
+                tts_.error_message().c_str());
             return;
         }
 
-        apply_gain(wav);
+        apply_gain(pcm);
 
-        if (!spk_.play_wav(wav)) {
+        // play() feeds raw int16_t samples directly to libpulse,
+        // bypassing the WAV parse step that play_wav() requires.
+        if (!spk_.play(pcm)) {
             std::fprintf(stderr,
-                "[speech] play_wav failed: %s\n",
+                "[speech] play failed: %s\n",
                 spk_.last_error().c_str());
         }
     }
 
-    TTSEngine         tts_{};
+    TTSEngine         tts_;          // persistent Piper subprocess
     Speaker           spk_{};
-    double            gain_ = 1.0;
-    bool              verbose_ = true;
+    double            gain_       = 1.0;
+    bool              verbose_    = true;
+    std::string       piper_bin_;
+    std::string       model_path_;
     std::atomic<bool> spoken_{false};
     std::atomic<bool> enabled_{false};
     std::atomic<uint64_t> play_generation_{0};
